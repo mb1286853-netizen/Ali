@@ -1,0 +1,183 @@
+"""
+هندلر بازار جنگ
+"""
+
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from keyboards import get_market_keyboard, get_back_keyboard
+
+def register_market_handlers(dp):
+    """ثبت هندلرهای بازار"""
+    dp.message.register(market_panel, F.text == "🏦 بازار جنگ")
+    dp.callback_query.register(show_fast_missiles, F.data == "market_fast")
+    dp.callback_query.register(show_apocalypse_missiles, F.data == "market_apocalypse")
+    dp.callback_query.register(buy_missile, F.data.startswith("buy_"))
+
+# داده‌های موشک‌ها
+MISSILES = {
+    "fast": [
+        {"name": "شهاب (Meteor)", "damage": 50, "price": 200, "level": 1},
+        {"name": "تگرگ (Hailstorm)", "damage": 70, "price": 500, "level": 2},
+        {"name": "سیل (Torrent)", "damage": 90, "price": 1000, "level": 3},
+        {"name": "توفان (Tempest)", "damage": 110, "price": 2000, "level": 4},
+        {"name": "آذرخش (Thunderbolt)", "damage": 130, "price": 5000, "level": 5}
+    ],
+    "apocalypse": [
+        {"name": "ارمغدن (Armageddon)", "damage": 500, "price": 50000, "gems": 15, "level": 15},
+        {"name": "اپوکالیپس (Apocalypse)", "damage": 400, "price": 40000, "gems": 12, "level": 12},
+        {"name": "رگناروک (Ragnarok)", "damage": 350, "price": 35000, "gems": 10, "level": 10},
+        {"name": "هارمجدون (Harmagedon)", "damage": 300, "price": 30000, "gems": 8, "level": 8},
+        {"name": "آتنا (Athena)", "damage": 250, "price": 25000, "gems": 5, "level": 6}
+    ]
+}
+
+async def market_panel(message: Message):
+    """منوی بازار جنگ"""
+    text = """
+🏦 **بازار جنگ**
+
+💎 **توجه:** کاربران عادی جم ندارند!
+
+🔥 **موشک‌های سریع:** فقط با سکه
+💀 **موشک‌های آخرالزمانی:** سکه + جم
+
+🎯 **جم فقط از طریق ادمین دریافت می‌شود!**
+"""
+    await message.answer(text, reply_markup=get_market_keyboard())
+
+async def show_fast_missiles(callback: CallbackQuery):
+    """نمایش موشک‌های سریع"""
+    text = """
+🔥 **موشک‌های سریع**
+
+موشک‌های پایه برای شروع:
+"""
+    
+    # ایجاد دکمه‌ها
+    buttons = []
+    for missile in MISSILES["fast"]:
+        btn_text = f"{missile['name']} - {missile['price']} سکه"
+        btn_data = f"buy_fast_{missile['name']}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=btn_data)])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    # اضافه کردن اطلاعات
+    for missile in MISSILES["fast"]:
+        text += f"\n• **{missile['name']}**"
+        text += f"\n  ⚡ Damage: {missile['damage']}"
+        text += f"\n  💰 قیمت: {missile['price']} سکه"
+        text += f"\n  📊 سطح: {missile['level']}\n"
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+async def show_apocalypse_missiles(callback: CallbackQuery):
+    """نمایش موشک‌های آخرالزمانی"""
+    text = """
+💀 **موشک‌های آخرالزمانی**
+
+موشک‌های قدرتمند (نیاز به جم):
+"""
+    
+    buttons = []
+    for missile in MISSILES["apocalypse"]:
+        btn_text = f"{missile['name']} - {missile['gems']} جم"
+        btn_data = f"buy_apo_{missile['name']}"
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=btn_data)])
+    
+    buttons.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    
+    for missile in MISSILES["apocalypse"]:
+        text += f"\n• **{missile['name']}**"
+        text += f"\n  ☠️ Damage: {missile['damage']}"
+        text += f"\n  💰 قیمت: {missile['price']} سکه + {missile['gems']} جم"
+        text += f"\n  📊 سطح: {missile['level']}\n"
+    
+    text += "\n⚠️ **کاربران عادی جم ندارند!**"
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+async def buy_missile(callback: CallbackQuery):
+    """خرید موشک"""
+    from main import db
+    
+    data = callback.data
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
+        return
+    
+    # تشخیص نوع موشک
+    if data.startswith("buy_fast_"):
+        missile_name = data.replace("buy_fast_", "")
+        missile_list = MISSILES["fast"]
+    elif data.startswith("buy_apo_"):
+        missile_name = data.replace("buy_apo_", "")
+        missile_list = MISSILES["apocalypse"]
+    else:
+        await callback.answer("❌ خطا در خرید!", show_alert=True)
+        return
+    
+    # پیدا کردن موشک
+    missile_data = None
+    for missile in missile_list:
+        if missile["name"] == missile_name:
+            missile_data = missile
+            break
+    
+    if not missile_data:
+        await callback.answer("❌ موشک یافت نشد!", show_alert=True)
+        return
+    
+    # چک کردن سطح
+    if user[6] < missile_data["level"]:
+        await callback.answer(f"❌ سطح کافی نیست! نیاز: سطح {missile_data['level']}", show_alert=True)
+        return
+    
+    # چک کردن منابع
+    if user[3] < missile_data["price"]:
+        await callback.answer(f"❌ سکه کافی نیست! نیاز: {missile_data['price']}", show_alert=True)
+        return
+    
+    if "gems" in missile_data and user[4] < missile_data["gems"]:
+        await callback.answer(f"❌ جم کافی نیست! نیاز: {missile_data['gems']}", show_alert=True)
+        return
+    
+    # خرید موشک
+    if "gems" in missile_data:
+        # موشک آخرالزمانی
+        db.update_coins(user_id, -missile_data["price"])
+        db.update_gems(user_id, -missile_data["gems"])
+        cost_text = f"{missile_data['price']} سکه + {missile_data['gems']} جم"
+    else:
+        # موشک سریع
+        db.update_coins(user_id, -missile_data["price"])
+        cost_text = f"{missile_data['price']} سکه"
+    
+    # اضافه کردن موشک به کاربر
+    db.add_missile(user_id, missile_name)
+    
+    # دریافت اطلاعات جدید
+    user = db.get_user(user_id)
+    
+    text = f"""
+✅ **خرید موفق!**
+
+🎯 **{missile_name}** خریداری شد!
+⚡ Damage: {missile_data['damage']}
+💰 هزینه: {cost_text}
+📦 تعداد: 1 عدد
+
+💎 باقی‌مانده:
+• سکه: {user[3]:,}
+• جم: {user[4]:,}
+"""
+    
+    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
+    await callback.answer("✅ خرید شد!")
