@@ -561,53 +561,6 @@ async def market_missiles(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
-@dp.callback_query(F.data.startswith("buy_missile_"))
-async def buy_missile(callback: CallbackQuery):
-    missile_name = callback.data.replace("buy_missile_", "")
-    
-    # پیدا کردن موشک
-    missile_data = None
-    for missile in MISSILES:
-        if missile["name"] == missile_name:
-            missile_data = missile
-            break
-    
-    if not missile_data:
-        await callback.answer("❌ موشک یافت نشد!", show_alert=True)
-        return
-    
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
-        return
-    
-    # چک کردن سطح
-    if user[6] < missile_data["level"]:
-        await callback.answer(f"❌ سطح کافی نیست! نیاز: سطح {missile_data['level']}", show_alert=True)
-        return
-    
-    # چک کردن منابع
-    if user[3] < missile_data["price"]:
-        await callback.answer(f"❌ سکه کافی نیست! نیاز: {missile_data['price']} سکه", show_alert=True)
-        return
-    
-    if "gems" in missile_data and user[4] < missile_data["gems"]:
-        await callback.answer(f"❌ جم کافی نیست! نیاز: {missile_data['gems']} جم", show_alert=True)
-        return
-    
-    # خرید موشک
-    db.update_resource(user_id, "coins", -missile_data["price"])
-    if "gems" in missile_data:
-        db.update_resource(user_id, "gems", -missile_data["gems"])
-    
-    db.add_missile(user_id, missile_name)
-    
-    # دریافت اطلاعات جدید
-    user = db.get_user(user_id)
-    
-    if "gems" in missile_data:
 # از خط 600 به بعد:
 
 @dp.callback_query(F.data.startswith("buy_missile_"))
