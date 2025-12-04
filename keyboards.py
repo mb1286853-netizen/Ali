@@ -75,12 +75,14 @@ def get_attack_keyboard():
         ]
     )
 
+# در قسمت keyboards، تابع get_support_keyboard() رو اینطور تغییر بده:
+
 def get_support_keyboard():
-    """پشتیبانی"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📩 پیام به پشتیبانی", callback_data="send_support")],
-            [InlineKeyboardButton(text="📨 پیام‌های من", callback_data="my_tickets")],
+            [InlineKeyboardButton(text="📩 ایجاد تیکت", callback_data="create_ticket")],
+            [InlineKeyboardButton(text="📋 تیکت‌های من", callback_data="my_tickets")],
+            [InlineKeyboardButton(text="📜 قوانین", callback_data="support_rules")],
             [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")]
         ]
     )
