@@ -982,46 +982,250 @@ async def fast_attack(callback: CallbackQuery):
     await callback.answer("✅ حمله انجام شد!")
 
 # ==================== SUPPORT HANDLERS ====================
-@dp.callback_query(F.data == "contact_admin")
-async def contact_admin(callback: CallbackQuery):
-    text = f"""
-📩 **تماس با ادمین**
+# ==================== SUPPORT TICKET SYSTEM ====================
 
-برای تماس با ادمین پیام خود را به صورت زیر بنویسید:
-
-`@{DEVELOPER_ID} پیام شما`
-
-👨‍💻 **توسعه‌دهنده:** @{DEVELOPER_ID}
-⏰ **پاسخگویی:** 24 ساعته
-
-💬 **مثال:**
-`@{DEVELOPER_ID} سلام، یک باگ در سیستم حمله وجود داره`
-"""
+@dp.callback_query(F.data == "create_ticket")
+async def create_ticket(callback: CallbackQuery):
+    """ایجاد تیکت جدید"""
+    user_id = callback.from_user.id
     
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer()
-
-@dp.callback_query(F.data == "report_bug")
-async def report_bug(callback: CallbackQuery):
+    # چک کردن تعداد تیکت‌های باز کاربر
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM support_tickets WHERE user_id = ? AND status = "open"', 
+                  (user_id,))
+    open_tickets = cursor.fetchone()[0]
+    conn.close()
+    
+    if open_tickets >= 3:
+        await callback.answer("❌ حداکثر 3 تیکت باز می‌توانی داشته باشی!", show_alert=True)
+        return
+    
     text = """
-🆘 **گزارش باگ**
+📝 **ایجاد تیکت جدید**
 
-برای گزارش باگ لطفاً موارد زیر را ذکر کنید:
+لطفاً پیام خود را بنویسید:
+• مشکل یا سوال خود را دقیق شرح دهید
+• در صورت امکان عکس/ویدئو ارسال کنید
+• شماره تیکت برای پیگیری به شما داده می‌شود
 
-1. **شرح مشکل:** دقیقاً چه اتفاقی افتاده؟
-2. **مراحل تولید:** چگونه باگ را تکرار کنیم؟
-3. **عکس/ویدئو:** اگر ممکن است ارسال کنید
-4. **سیستم:** موبایل/کامپیوتر، مرورگر/اپ
-
-📧 **ارسال به:** @{DEVELOPER_ID}
-
-⚠️ **توجه:** گزارش‌های دقیق تر سریع‌تر رفع می‌شوند!
+⏰ **حداکثر 500 کاراکتر**
 """
     
-    text = text.replace("{DEVELOPER_ID}", DEVELOPER_ID)
-    
     await callback.message.edit_text(text, reply_markup=get_back_keyboard())
+    await callback.answer("پیام خود را بنویسید...")
+
+@dp.callback_query(F.data == "my_tickets")
+async def my_tickets(callback: CallbackQuery):
+    """نمایش تیکت‌های کاربر"""
+    user_id = callback.from_user.id
+    
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT ticket_id, message, status, admin_reply, created_at 
+        FROM support_tickets 
+        WHERE user_id = ? 
+        ORDER BY created_at DESC 
+        LIMIT 5
+    ''', (user_id,))
+    
+    tickets = cursor.fetchall()
+    conn.close()
+    
+    if not tickets:
+        text = "📭 **هیچ تیکتی ندارید!**"
+    else:
+        text = "📋 **تیکت‌های شما**\n\n"
+        
+        for ticket in tickets:
+            ticket_id, message, status, admin_reply, created_at = ticket
+            
+            if status == "open":
+                status_icon = "🟡"
+            elif status == "answered":
+                status_icon = "🟢"
+            else:
+                status_icon = "🔴"
+            
+            text += f"{status_icon} **#{ticket_id}**\n"
+            text += f"📝 {message[:40]}...\n"
+            
+            if admin_reply:
+                text += f"📨 پاسخ: {admin_reply[:40]}...\n"
+            
+            text += f"📅 {created_at[:10]}\n\n"
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📩 تیکت جدید", callback_data="create_ticket")],
+            [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")]
+        ]
+    )
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
+
+# هندلر پیام‌های تیکت
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handle_ticket_message(message: Message):
+    """پردازش پیام تیکت"""
+    # اگر پیام کوتاه است، احتمالاً تیکت نیست
+    if len(message.text.strip().split()) < 3:
+        return
+    
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.full_name
+    ticket_text = message.text
+    
+    # محدودیت طول
+    if len(ticket_text) > 500:
+        await message.answer("❌ پیام نباید بیشتر از 500 کاراکتر باشد!")
+        return
+    
+    # چک کردن تعداد تیکت‌های باز
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM support_tickets WHERE user_id = ? AND status = "open"', 
+                  (user_id,))
+    open_tickets = cursor.fetchone()[0]
+    
+    if open_tickets >= 3:
+        await message.answer("❌ شما 3 تیکت باز دارید! لطفاً منتظر پاسخ باشید.")
+        conn.close()
+        return
+    
+    # ایجاد تیکت
+    cursor.execute('''
+        INSERT INTO support_tickets (user_id, username, message, status)
+        VALUES (?, ?, ?, 'open')
+    ''', (user_id, username, ticket_text))
+    
+    ticket_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    await message.answer(f"""
+✅ **تیکت #{ticket_id} ایجاد شد!**
+
+📝 پیام شما ثبت شد.
+⏰ پاسخ: حداکثر 24 ساعت
+
+📋 وضعیت: /tickets
+""")
+
+# ==================== ADMIN TICKET COMMANDS ====================
+
+@dp.message(Command("tickets"))
+async def view_tickets(message: Message):
+    """مشاهده تیکت‌ها"""
+    user_id = message.from_user.id
+    
+    if str(user_id) != DEVELOPER_ID:
+        await message.answer("⛔ فقط ادمین!")
+        return
+    
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT ticket_id, user_id, username, message FROM support_tickets WHERE status = "open"')
+    tickets = cursor.fetchall()
+    conn.close()
+    
+    if not tickets:
+        await message.answer("✅ هیچ تیکت بازی وجود ندارد!")
+        return
+    
+    text = "🎫 **تیکت‌های باز:**\n\n"
+    
+    for ticket in tickets:
+        ticket_id, user_id, username, message = ticket
+        text += f"**#{ticket_id}** - {username}\n"
+        text += f"👤 {user_id}\n"
+        text += f"📝 {message[:50]}...\n"
+        text += f"🔹 پاسخ: /reply_{ticket_id} متن\n"
+        text += f"🔸 بستن: /close_{ticket_id}\n\n"
+    
+    await message.answer(text)
+
+@dp.message(Command("reply"))
+async def reply_to_ticket(message: Message):
+    """پاسخ به تیکت"""
+    user_id = message.from_user.id
+    
+    if str(user_id) != DEVELOPER_ID:
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 3:
+        await message.answer("⚠️ فرمت: /reply_<شماره> <متن>")
+        return
+    
+    try:
+        # استخراج شماره تیکت
+        ticket_id = int(parts[0].replace("/reply_", ""))
+        reply_text = " ".join(parts[1:])
+        
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        
+        # دریافت اطلاعات تیکت
+        cursor.execute('SELECT user_id, message FROM support_tickets WHERE ticket_id = ?', 
+                      (ticket_id,))
+        ticket = cursor.fetchone()
+        
+        if not ticket:
+            await message.answer("❌ تیکت یافت نشد!")
+            conn.close()
+            return
+        
+        target_user_id = ticket[0]
+        
+        # بروزرسانی تیکت
+        cursor.execute('UPDATE support_tickets SET status = "answered", admin_reply = ? WHERE ticket_id = ?', 
+                      (reply_text, ticket_id))
+        conn.commit()
+        conn.close()
+        
+        # ارسال پاسخ به کاربر
+        try:
+            await bot.send_message(target_user_id, f"""
+📨 **پاسخ به تیکت #{ticket_id}**
+
+💬 **پاسخ پشتیبانی:** {reply_text}
+
+✅ تیکت شما پاسخ داده شد.
+""")
+        except:
+            pass
+        
+        await message.answer(f"✅ پاسخ به تیکت #{ticket_id} ارسال شد.")
+        
+    except:
+        await message.answer("❌ خطا!")
+
+@dp.message(Command("close"))
+async def close_ticket(message: Message):
+    """بستن تیکت"""
+    user_id = message.from_user.id
+    
+    if str(user_id) != DEVELOPER_ID:
+        return
+    
+    try:
+        ticket_id = int(message.text.split()[0].replace("/close_", ""))
+        
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE support_tickets SET status = "closed" WHERE ticket_id = ?', 
+                      (ticket_id,))
+        conn.commit()
+        conn.close()
+        
+        await message.answer(f"✅ تیکت #{ticket_id} بسته شد.")
+        
+    except:
+        await message.answer("❌ خطا!")
 
 # ==================== ADMIN COMMANDS ====================
 @dp.message(Command("admin"))
