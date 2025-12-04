@@ -608,10 +608,59 @@ async def buy_missile(callback: CallbackQuery):
     user = db.get_user(user_id)
     
     if "gems" in missile_data:
-        # خط 611 به بعد:
-    cost_text = f"{missile_data['price']} سکه + {missile_data['gems']} جم"
+# از خط 600 به بعد:
+
+@dp.callback_query(F.data.startswith("buy_missile_"))
+async def buy_missile(callback: CallbackQuery):
+    missile_name = callback.data.replace("buy_missile_", "")
+    
+    # پیدا کردن موشک
+    missile_data = None
+    for missile in MISSILES:
+        if missile["name"] == missile_name:
+            missile_data = missile
+            break
+    
+    if not missile_data:
+        await callback.answer("❌ موشک یافت نشد!", show_alert=True)
+        return
+    
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
+        return
+    
+    # چک کردن سطح
+    if user[6] < missile_data["level"]:
+        await callback.answer(f"❌ سطح کافی نیست! نیاز: سطح {missile_data['level']}", show_alert=True)
+        return
+    
+    # چک کردن منابع
+    if user[3] < missile_data["price"]:
+        await callback.answer(f"❌ سکه کافی نیست! نیاز: {missile_data['price']} سکه", show_alert=True)
+        return
+    
+    # چک کردن جم اگر موشک نیاز دارد
+    if "gems" in missile_data and missile_data["gems"] > 0 and user[4] < missile_data["gems"]:
+        await callback.answer(f"❌ جم کافی نیست! نیاز: {missile_data['gems']} جم", show_alert=True)
+        return
+    
+    # خرید موشک
+    db.update_resource(user_id, "coins", -missile_data["price"])
+    
+    # کم کردن جم اگر نیاز دارد
+    if "gems" in missile_data and missile_data["gems"] > 0:
+        db.update_resource(user_id, "gems", -missile_data["gems"])
+        cost_text = f"{missile_data['price']} سکه + {missile_data['gems']} جم"
     else:
         cost_text = f"{missile_data['price']} سکه"
+    
+    db.add_missile(user_id, missile_name)
+    
+    # دریافت اطلاعات جدید
+    user = db.get_user(user_id)
     
     text = f"""
 ✅ **خرید موفق!**
@@ -628,83 +677,6 @@ async def buy_missile(callback: CallbackQuery):
     
     await callback.message.edit_text(text, reply_markup=get_back_keyboard())
     await callback.answer("✅ خرید شد!")
-
-@dp.callback_query(F.data == "market_fighters")
-async def market_fighters(callback: CallbackQuery):
-    text = "🛩️ **جنگنده‌های قابل خرید:**\n\n"
-    
-    buttons = []
-    for fighter in FIGHTERS:
-        btn_text = f"{fighter['name']} - {fighter['price']} سکه"
-        btn_data = f"buy_fighter_{fighter['name']}"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=btn_data)])
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    for fighter in FIGHTERS:
-        text += f"• **{fighter['name']}**\n"
-        text += f"  ⬆️ Bonus: +{fighter['bonus']}% damage\n"
-        text += f"  💰 قیمت: {fighter['price']} سکه\n"
-        text += f"  📊 سطح: {fighter['level']}\n\n"
-    
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("buy_fighter_"))
-async def buy_fighter(callback: CallbackQuery):
-    fighter_name = callback.data.replace("buy_fighter_", "")
-    
-    # پیدا کردن جنگنده
-    fighter_data = None
-    for fighter in FIGHTERS:
-        if fighter["name"] == fighter_name:
-            fighter_data = fighter
-            break
-    
-    if not fighter_data:
-        await callback.answer("❌ جنگنده یافت نشد!", show_alert=True)
-        return
-    
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
-        return
-    
-    # چک کردن سطح
-    if user[6] < fighter_data["level"]:
-        await callback.answer(f"❌ سطح کافی نیست! نیاز: سطح {fighter_data['level']}", show_alert=True)
-        return
-    
-    # چک کردن سکه
-    if user[3] < fighter_data["price"]:
-        await callback.answer(f"❌ سکه کافی نیست! نیاز: {fighter_data['price']} سکه", show_alert=True)
-        return
-    
-    # خرید جنگنده
-    db.update_resource(user_id, "coins", -fighter_data["price"])
-    db.add_fighter(user_id, fighter_name)
-    
-    # دریافت اطلاعات جدید
-    user = db.get_user(user_id)
-    
-    text = f"""
-✅ **خرید موفق!**
-
-🛩️ **{fighter_name}** خریداری شد!
-⬆️ Bonus: +{fighter_data['bonus']}% damage
-💰 هزینه: {fighter_data['price']} سکه
-📦 تعداد: 1 عدد
-
-💎 **باقی‌مانده:**
-• سکه: {user[3]:,}
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("✅ جنگنده خریداری شد!")
-
 # ==================== MINER HANDLERS ====================
 @dp.callback_query(F.data == "miner_claim")
 async def claim_miner(callback: CallbackQuery):
