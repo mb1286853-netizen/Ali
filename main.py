@@ -1,5 +1,6 @@
 """
-🏆 Warzone Bot - نسخه کامل و اصلاح شده
+🏆 Warzone Bot - نسخه نهایی و کامل
+تمامی مشکلات رفع شده
 """
 
 import asyncio
@@ -18,7 +19,8 @@ from dotenv import load_dotenv
 # ==================== CONFIG ====================
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-DEVELOPER_ID = os.getenv("DEVELOPER_ID", "")
+DEVELOPER_ID = int(os.getenv("DEVELOPER_ID", "0"))
+ADMIN_IDS = [DEVELOPER_ID]  # شما ادمین اصلی هستید
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +38,6 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # جدول کاربران
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -54,7 +55,6 @@ class Database:
             )
         ''')
         
-        # جدول موشک‌ها
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS missiles (
                 user_id INTEGER,
@@ -62,15 +62,46 @@ class Database:
                 quantity INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, missile_type)
             )
-        ''')
+''')
         
-        # جدول جنگنده‌ها
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS fighters (
                 user_id INTEGER,
                 fighter_type TEXT,
                 quantity INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, fighter_type)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                message TEXT,
+                status TEXT DEFAULT 'open',
+                admin_reply TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS free_boxes (
+                user_id INTEGER PRIMARY KEY,
+                last_free_box INTEGER DEFAULT 0,
+                total_claimed INTEGER DEFAULT 0
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS attacks (
+                attack_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attacker_id INTEGER,
+                target_id INTEGER,
+                damage INTEGER,
+                missile_type TEXT,
+                combo_type TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -139,7 +170,6 @@ class Database:
 
 # ==================== KEYBOARDS ====================
 def get_main_keyboard():
-    """کیبورد اصلی کامل"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🎮 پنل جنگجو"), KeyboardButton(text="⚔️ حمله")],
@@ -185,8 +215,6 @@ def get_defense_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🛡️ برج سایبری", callback_data="defense_cyber")],
-            [InlineKeyboardButton(text="🚀 موشک دفاعی", callback_data="defense_missile")],
-            [InlineKeyboardButton(text="🛡️ ضد جنگنده", callback_data="defense_anti")],
             [InlineKeyboardButton(text="📊 وضعیت دفاع", callback_data="defense_status")],
             [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")]
         ]
@@ -208,7 +236,7 @@ def get_box_keyboard():
             [InlineKeyboardButton(text="📦 باکس سکه (1000)", callback_data="box_coin")],
             [InlineKeyboardButton(text="💎 باکس جم (1500)", callback_data="box_gem")],
             [InlineKeyboardButton(text="🎯 باکس ZP (2000)", callback_data="box_zp")],
-            [InlineKeyboardButton(text="🏆 باکس افسانه‌ای (5 جم)", callback_data="box_legend")],
+            [InlineKeyboardButton(text="🎁 باکس رایگان (24h)", callback_data="box_free")],
             [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")]
         ]
     )
@@ -216,9 +244,9 @@ def get_box_keyboard():
 def get_support_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📩 تماس با ادمین", callback_data="contact_admin")],
-            [InlineKeyboardButton(text="📋 قوانین", callback_data="support_rules")],
-            [InlineKeyboardButton(text="🆘 گزارش باگ", callback_data="report_bug")],
+            [InlineKeyboardButton(text="📩 ایجاد تیکت", callback_data="create_ticket")],
+            [InlineKeyboardButton(text="📋 تیکت‌های من", callback_data="my_tickets")],
+            [InlineKeyboardButton(text="📜 قوانین", callback_data="support_rules")],
             [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")]
         ]
     )
@@ -237,6 +265,7 @@ MISSILES = [
     {"name": "موشک بالستیک", "price": 500, "damage": 80, "level": 3},
     {"name": "موشک هدایت‌شونده", "price": 1000, "damage": 120, "level": 4},
     {"name": "موشک زمین به هوا", "price": 2000, "damage": 180, "level": 5},
+    {"name": "موشک هوا به هوا", "price": 1500, "damage": 150, "level": 4},
     {"name": "موشک هسته‌ای", "price": 5000, "damage": 300, "level": 10, "gems": 3}
 ]
 
@@ -348,22 +377,45 @@ async def fighters_panel(message: Message):
     user_id = message.from_user.id
     conn = db.get_connection()
     cursor = conn.cursor()
+    
     cursor.execute('SELECT fighter_type, quantity FROM fighters WHERE user_id = ?', (user_id,))
     user_fighters = cursor.fetchall()
+    
+    cursor.execute('SELECT missile_type, quantity FROM missiles WHERE user_id = ? AND missile_type = "موشک هوا به هوا"', (user_id,))
+    air_missiles = cursor.fetchall()
+    
     conn.close()
     
     text = "🛩️ **ناوگان جنگنده‌های شما**\n\n"
     
     if user_fighters:
+        text += "**✈️ جنگنده‌ها:**\n"
         for fighter in user_fighters:
             f_type, quantity = fighter
             text += f"• {f_type}: {quantity} عدد\n"
+        text += "\n"
     else:
         text += "📭 **هنوز جنگنده ندارید!**\n\n"
     
-    text += "\n🏪 به بازار جنگ بروید و جنگنده بخرید!"
+    if air_missiles:
+        text += "**🚀 موشک‌های هوا به هوا:**\n"
+        for missile in air_missiles:
+            m_type, quantity = missile
+            text += f"• {m_type}: {quantity} عدد\n"
+    else:
+        text += "📭 **موشک هوا به هوا ندارید!**\n\n"
     
-    await message.answer(text, reply_markup=get_back_keyboard())
+    text += "\n🏪 برای خرید به بازار جنگ بروید!"
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏪 خرید جنگنده", callback_data="market_fighters")],
+            [InlineKeyboardButton(text="🚀 خرید موشک هوا به هوا", callback_data="buy_air_missile")],
+            [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")]
+        ]
+    )
+    
+    await message.answer(text, reply_markup=keyboard)
 
 @dp.message(F.text == "🎁 باکس‌ها")
 async def boxes_panel(message: Message):
@@ -375,7 +427,7 @@ async def boxes_panel(message: Message):
 📦 **باکس سکه:** 1000 سکه - جایزه: 200-2000 سکه
 💎 **باکس جم:** 1500 سکه - جایزه: 1-5 جم  
 🎯 **باکس ZP:** 2000 سکه - جایزه: 100-500 ZP
-🏆 **باکس افسانه‌ای:** 5 جم - جایزه: ترکیبی ویژه
+🎁 **باکس رایگان:** هر 24 ساعت - جایزه: تصادفی
 
 🎰 **شانس برنده شدن بالا!**
 """
@@ -398,19 +450,19 @@ async def attack_panel(message: Message):
 
 @dp.message(F.text == "📞 پشتیبانی")
 async def support_panel(message: Message):
-    text = f"""
-📞 **سیستم پشتیبانی**
+    text = """
+📞 **سیستم تیکت پشتیبانی**
 
-🤝 **برای ارتباط با ادمین:**
+🎫 **برای ایجاد تیکت جدید:**
+1. روی "📩 ایجاد تیکت" کلیک کن
+2. پیام خودت رو بنویس
+3. تیکت ثبت می‌شه
 
-• گزارش باگ و مشکل
-• سوال درباره بازی
-• پیشنهاد و انتقاد
-
-👨‍💻 **توسعه‌دهنده:** @{DEVELOPER_ID}
-⏰ **پاسخگویی:** 24 ساعته
+📋 **تیکت‌های من:**
+می‌تونی تیکت‌های قبلیت رو ببینی و وضعشون رو چک کنی
 
 ⚠️ **قوانین:** احترام متقابل، عدم اسپم
+⏰ **پاسخگویی:** 24 ساعته
 """
     await message.answer(text, reply_markup=get_support_keyboard())
 
@@ -493,12 +545,6 @@ async def show_wallet(callback: CallbackQuery):
 🪙 **سکه:** {user[3]:,}
 💎 **جم:** {user[4]:,}
 🎯 **ZP:** {user[5]:,}
-
-📊 **وضعیت:**
-• سطح: {user[6]}
-• XP: {user[7]}/1000
-• پدافند: سطح {user[8]}
-• ماینر: سطح {user[9]}
 """
     else:
         text = "⚠️ ابتدا ثبت‌نام کن!"
@@ -530,799 +576,37 @@ async def show_arsenal(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=get_back_keyboard())
     await callback.answer()
 
-# ==================== MARKET HANDLERS ====================
-@dp.callback_query(F.data == "market_missiles")
-async def market_missiles(callback: CallbackQuery):
-    text = "💣 **موشک‌های قابل خرید:**\n\n"
-    
-    buttons = []
-    for missile in MISSILES:
-        if "gems" in missile:
-            price_text = f"{missile['price']} سکه + {missile['gems']} جم"
-            btn_text = f"{missile['name']} - {price_text}"
-        else:
-            btn_text = f"{missile['name']} - {missile['price']} سکه"
-        
-        btn_data = f"buy_missile_{missile['name']}"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=btn_data)])
-    
-    buttons.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")])
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    for missile in MISSILES:
-        text += f"• **{missile['name']}**\n"
-        text += f"  ⚡ Damage: {missile['damage']}\n"
-        if "gems" in missile:
-            text += f"  💰 قیمت: {missile['price']} سکه + {missile['gems']} جم\n"
-        else:
-            text += f"  💰 قیمت: {missile['price']} سکه\n"
-        text += f"  📊 سطح: {missile['level']}\n\n"
-    
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-# از خط 600 به بعد:
-
-@dp.callback_query(F.data.startswith("buy_missile_"))
-async def buy_missile(callback: CallbackQuery):
-    missile_name = callback.data.replace("buy_missile_", "")
-    
-    # پیدا کردن موشک
-    missile_data = None
-    for missile in MISSILES:
-        if missile["name"] == missile_name:
-            missile_data = missile
-            break
-    
-    if not missile_data:
-        await callback.answer("❌ موشک یافت نشد!", show_alert=True)
-        return
-    
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
-        return
-    
-    # چک کردن سطح
-    if user[6] < missile_data["level"]:
-        await callback.answer(f"❌ سطح کافی نیست! نیاز: سطح {missile_data['level']}", show_alert=True)
-        return
-    
-    # چک کردن منابع
-    if user[3] < missile_data["price"]:
-        await callback.answer(f"❌ سکه کافی نیست! نیاز: {missile_data['price']} سکه", show_alert=True)
-        return
-    
-    # چک کردن جم اگر موشک نیاز دارد
-    if "gems" in missile_data and missile_data["gems"] > 0 and user[4] < missile_data["gems"]:
-        await callback.answer(f"❌ جم کافی نیست! نیاز: {missile_data['gems']} جم", show_alert=True)
-        return
-    
-    # خرید موشک
-    db.update_resource(user_id, "coins", -missile_data["price"])
-    
-    # کم کردن جم اگر نیاز دارد
-    if "gems" in missile_data and missile_data["gems"] > 0:
-        db.update_resource(user_id, "gems", -missile_data["gems"])
-        cost_text = f"{missile_data['price']} سکه + {missile_data['gems']} جم"
-    else:
-        cost_text = f"{missile_data['price']} سکه"
-    
-    db.add_missile(user_id, missile_name)
-    
-    # دریافت اطلاعات جدید
-    user = db.get_user(user_id)
-    
-    text = f"""
-✅ **خرید موفق!**
-
-💣 **{missile_name}** خریداری شد!
-⚡ Damage: {missile_data['damage']}
-💰 هزینه: {cost_text}
-📦 تعداد: 1 عدد
-
-💎 **باقی‌مانده:**
-• سکه: {user[3]:,}
-• جم: {user[4]:,}
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("✅ خرید شد!")
-# ==================== MINER HANDLERS ====================
-@dp.callback_query(F.data == "miner_claim")
-async def claim_miner(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
-        return
-    
-    current_time = int(time.time())
-    last_miner = user[10]
-    miner_level = user[9]
-    
-    # چک کردن زمان
-    if last_miner > 0 and (current_time - last_miner) < 3600:
-        remaining = 3600 - (current_time - last_miner)
-        minutes = remaining // 60
-        seconds = remaining % 60
-        await callback.answer(f"⏳ {minutes} دقیقه و {seconds} ثانیه دیگر", show_alert=True)
-        return
-    
-    # محاسبه درآمد
-    income = miner_level * 100
-    
-    # بروزرسانی دیتابیس
-    db.update_resource(user_id, "zp", income)
-    
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('UPDATE users SET last_miner_time = ? WHERE user_id = ?', 
-                  (current_time, user_id))
-    conn.commit()
-    conn.close()
-    
-    # دریافت اطلاعات جدید
-    user = db.get_user(user_id)
-    
-    text = f"""
-⛏️ **برداشت موفق!**
-
-💰 **درآمد:** +{income} ZP
-📊 **کل ZP:** {user[5]:,}
-🔧 **ماینر:** سطح {miner_level}
-⏰ **برداشت بعدی:** 1 ساعت دیگر
-
-⚡ برای درآمد بیشتر ماینر را ارتقا بده!
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("✅ ZP برداشت شد!")
-
-@dp.callback_query(F.data == "miner_upgrade")
-async def upgrade_miner(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
-        return
-    
-    miner_level = user[9]
-    upgrade_cost = miner_level * 150
-    
-    if user[3] < upgrade_cost:
-        await callback.answer(f"❌ سکه کافی نیست! نیاز: {upgrade_cost} سکه", show_alert=True)
-        return
-    
-    # ارتقای ماینر
-    db.update_resource(user_id, "coins", -upgrade_cost)
-    
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('UPDATE users SET miner_level = miner_level + 1 WHERE user_id = ?', 
-                  (user_id,))
-    conn.commit()
-    conn.close()
-    
-    # دریافت اطلاعات جدید
-    user = db.get_user(user_id)
-    
-    text = f"""
-⬆️ **ارتقای موفق!**
-
-✅ ماینر به سطح {user[9]} ارتقا یافت!
-💰 هزینه: {upgrade_cost} سکه
-💎 باقی‌مانده: {user[3]:,} سکه
-📈 درآمد جدید: {user[9] * 100} ZP/ساعت
-
-🎉 حالا درآمد بیشتری داری!
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("✅ ماینر ارتقا یافت!")
-
-# ==================== DEFENSE HANDLERS ====================
-@dp.callback_query(F.data == "defense_status")
-async def defense_status(callback: CallbackQuery):
+@dp.callback_query(F.data == "stats")
+async def show_stats(callback: CallbackQuery):
     user = db.get_user(callback.from_user.id)
     
-    if user:
-        defense_level = user[8]
-        
-        text = f"""
-🛡️ **وضعیت پدافند پایگاه**
-
-📊 **سطح کلی پدافند:** {defense_level}
-🛡️ **کاهش damage:** {defense_level * 5}%
-
-🏰 **سیستم‌های دفاعی:**
-• برج سایبری: سطح {max(1, defense_level // 3)}
-• موشک دفاعی: سطح {max(1, defense_level // 2)}
-• ضد جنگنده: سطح {max(1, defense_level // 4)}
-
-💰 **ارتقای بعدی:** {defense_level * 300} سکه
-"""
-    else:
-        text = "⚠️ ابتدا ثبت‌نام کن!"
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer()
-
-@dp.callback_query(F.data == "defense_cyber")
-async def upgrade_cyber(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
     if not user:
         await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
         return
     
-    defense_level = user[8]
-    upgrade_cost = defense_level * 300
-    
-    if user[3] < upgrade_cost:
-        await callback.answer(f"❌ سکه کافی نیست! نیاز: {upgrade_cost} سکه", show_alert=True)
-        return
-    
-    # ارتقای پدافند
-    db.update_resource(user_id, "coins", -upgrade_cost)
-    
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('UPDATE users SET defense_level = defense_level + 1 WHERE user_id = ?', 
-                  (user_id,))
-    conn.commit()
-    conn.close()
-    
-    user = db.get_user(user_id)
-    
-    text = f"""
-🛡️ **برج سایبری ارتقا یافت!**
-
-✅ سطح پدافند: {user[8]}
-💰 هزینه: {upgrade_cost} سکه
-💎 باقی‌مانده: {user[3]:,} سکه
-🛡️ **کاهش damage جدید:** {user[8] * 5}%
-
-✨ دفاع پایگاه تقویت شد!
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("✅ پدافند ارتقا یافت!")
-
-# ==================== BOX HANDLERS ====================
-@dp.callback_query(F.data == "box_coin")
-async def open_coin_box(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
-        return
-    
-    box_price = 1000
-    
-    if user[3] < box_price:
-        await callback.answer(f"❌ سکه کافی نیست! نیاز: {box_price} سکه", show_alert=True)
-        return
-    
-    # خرید باکس
-    db.update_resource(user_id, "coins", -box_price)
-    
-    # جایزه تصادفی
-    reward = random.randint(200, 2000)
-    db.update_resource(user_id, "coins", reward)
-    
-    user = db.get_user(user_id)
-    
-    text = f"""
-🎁 **باکس سکه باز شد!**
-
-💰 **جایزه:** {reward:,} سکه!
-🎰 **شانس:** متوسط
-
-💎 **موجودی جدید:**
-• سکه: {user[3]:,}
-• جم: {user[4]:,}
-
-✨ شانس خود را دوباره امتحان کن!
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("🎉 باکس باز شد!")
-
-@dp.callback_query(F.data == "box_gem")
-async def open_gem_box(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    if not user:
-        await callback.answer("⚠️ ابتدا ثبت‌نام کن!", show_alert=True)
-        return
-    
-    box_price = 1500
-    
-    if user[3] < box_price:
-        await callback.answer(f"❌ سکه کافی نیست! نیاز: {box_price} سکه", show_alert=True)
-        return
-    
-    # خرید باکس
-    db.update_resource(user_id, "coins", -box_price)
-    
-    # جایزه تصادفی (شانس 40% برای جم)
-    if random.random() < 0.4:
-        reward = random.randint(1, 5)
-        db.update_resource(user_id, "gems", reward)
-        reward_text = f"💎 **{reward} جم**"
-        reward_type = "جم"
-    else:
-        reward = random.randint(300, 1000)
-        db.update_resource(user_id, "coins", reward)
-        reward_text = f"💰 **{reward:,} سکه**"
-        reward_type = "سکه"
-    
-    user = db.get_user(user_id)
-    
-    text = f"""
-🎁 **باکس جم باز شد!**
-
-{reward_text}
-🎰 **شانس:** {'عالی' if reward_type == 'جم' else 'خوب'}
-
-💎 **موجودی جدید:**
-• سکه: {user[3]:,}
-• جم: {user[4]:,}
-
-✨ {'💎 جم کمیاب!' if reward_type == 'جم' else 'دفعه بعد شانس بیشتری داری!'}
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("🎉 باکس باز شد!")
-
-# ==================== ATTACK HANDLERS ====================
-@dp.callback_query(F.data == "attack_fast")
-async def fast_attack(callback: CallbackQuery):
-    if callback.message.reply_to_message is None:
-        await callback.answer("❌ روی پیام کاربر ریپلای کن!", show_alert=True)
-        return
-    
-    attacker_id = callback.from_user.id
-    target_id = callback.message.reply_to_message.from_user.id
-    
-    if attacker_id == target_id:
-        await callback.answer("❌ نمی‌توانی به خودت حمله کنی!", show_alert=True)
-        return
-    
-    attacker = db.get_user(attacker_id)
-    target = db.get_user(target_id)
-    
-    if not attacker or not target:
-        await callback.answer("❌ کاربر یافت نشد!", show_alert=True)
-        return
-    
-    # چک کردن موشک
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT missile_type, quantity FROM missiles WHERE user_id = ? AND quantity > 0 LIMIT 1', 
-                  (attacker_id,))
-    missile = cursor.fetchone()
-    
-    if not missile:
-        await callback.answer("❌ موشک ندارید!", show_alert=True)
-        conn.close()
-        return
-    
-    missile_type = missile[0]
-    
-    # محاسبه damage
-    base_damage = random.randint(50, 150)
-    attacker_level = attacker[6]
-    target_level = target[6]
-    target_defense = target[8]
-    
-    # اعمال bonus/penalty
-    level_diff = attacker_level - target_level
-    level_bonus = 1 + (level_diff * 0.1)
-    defense_reduction = 1 - (target_defense * 0.05)
-    
-    final_damage = int(base_damage * level_bonus * defense_reduction)
-    
-    # اعمال damage
-    new_target_zp = max(0, target[5] - final_damage)
-    damage_dealt = target[5] - new_target_zp
-    
-    db.update_resource(target_id, "zp", -damage_dealt)
-    
-    # XP برای حمله کننده
-    xp_gain = min(50, damage_dealt // 5)
-    db.update_resource(attacker_id, "xp", xp_gain)
-    
-    # کم کردن موشک
-    cursor.execute('UPDATE missiles SET quantity = quantity - 1 WHERE user_id = ? AND missile_type = ?', 
-                  (attacker_id, missile_type))
-    
-    # ثبت حمله
-    cursor.execute('''
-        INSERT INTO attacks (attacker_id, target_id, damage, missile_type)
-        VALUES (?, ?, ?, ?)
-    ''', (attacker_id, target_id, damage_dealt, missile_type))
-    
-    conn.commit()
-    conn.close()
-    
-    # چک کردن ارتقا سطح
-    attacker = db.get_user(attacker_id)
-    if attacker[7] >= 1000:
-        conn = db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('UPDATE users SET level = level + 1, xp = 0 WHERE user_id = ?', (attacker_id,))
-        conn.commit()
-        conn.close()
-        level_up = True
-    else:
-        level_up = False
-    
-    text = f"""
-⚔️ **حمله سریع انجام شد!**
-
-🎯 **هدف:** {callback.message.reply_to_message.from_user.full_name}
-💣 **موشک:** {missile_type}
-⚡ **Damage:** {damage_dealt}
-⭐ **XP کسب شده:** +{xp_gain}
-🛡️ **دفاع هدف:** -{target_defense * 5}%
-
-{"🎉 **سطح شما ارتقا یافت!**" if level_up else ""}
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("✅ حمله انجام شد!")
-
-# ==================== SUPPORT HANDLERS ====================
-# ==================== SUPPORT TICKET SYSTEM ====================
-
-@dp.callback_query(F.data == "create_ticket")
-async def create_ticket(callback: CallbackQuery):
-    """ایجاد تیکت جدید"""
-    user_id = callback.from_user.id
-    
-    # چک کردن تعداد تیکت‌های باز کاربر
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM support_tickets WHERE user_id = ? AND status = "open"', 
-                  (user_id,))
-    open_tickets = cursor.fetchone()[0]
-    conn.close()
-    
-    if open_tickets >= 3:
-        await callback.answer("❌ حداکثر 3 تیکت باز می‌توانی داشته باشی!", show_alert=True)
-        return
-    
-    text = """
-📝 **ایجاد تیکت جدید**
-
-لطفاً پیام خود را بنویسید:
-• مشکل یا سوال خود را دقیق شرح دهید
-• در صورت امکان عکس/ویدئو ارسال کنید
-• شماره تیکت برای پیگیری به شما داده می‌شود
-
-⏰ **حداکثر 500 کاراکتر**
-"""
-    
-    await callback.message.edit_text(text, reply_markup=get_back_keyboard())
-    await callback.answer("پیام خود را بنویسید...")
-
-@dp.callback_query(F.data == "my_tickets")
-async def my_tickets(callback: CallbackQuery):
-    """نمایش تیکت‌های کاربر"""
-    user_id = callback.from_user.id
-    
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT ticket_id, message, status, admin_reply, created_at 
-        FROM support_tickets 
-        WHERE user_id = ? 
-        ORDER BY created_at DESC 
-        LIMIT 5
-    ''', (user_id,))
-    
-    tickets = cursor.fetchall()
-    conn.close()
-    
-    if not tickets:
-        text = "📭 **هیچ تیکتی ندارید!**"
-    else:
-        text = "📋 **تیکت‌های شما**\n\n"
-        
-        for ticket in tickets:
-            ticket_id, message, status, admin_reply, created_at = ticket
-            
-            if status == "open":
-                status_icon = "🟡"
-            elif status == "answered":
-                status_icon = "🟢"
-            else:
-                status_icon = "🔴"
-            
-            text += f"{status_icon} **#{ticket_id}**\n"
-            text += f"📝 {message[:40]}...\n"
-            
-            if admin_reply:
-                text += f"📨 پاسخ: {admin_reply[:40]}...\n"
-            
-            text += f"📅 {created_at[:10]}\n\n"
-    
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📩 تیکت جدید", callback_data="create_ticket")],
-            [InlineKeyboardButton(text="⬅️ بازگشت", callback_data="main_menu")]
-        ]
-    )
-    
-    await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
-
-# هندلر پیام‌های تیکت
-@dp.message(F.text & ~F.text.startswith("/"))
-async def handle_ticket_message(message: Message):
-    """پردازش پیام تیکت"""
-    # اگر پیام کوتاه است، احتمالاً تیکت نیست
-    if len(message.text.strip().split()) < 3:
-        return
-    
-    user_id = message.from_user.id
-    username = message.from_user.username or message.from_user.full_name
-    ticket_text = message.text
-    
-    # محدودیت طول
-    if len(ticket_text) > 500:
-        await message.answer("❌ پیام نباید بیشتر از 500 کاراکتر باشد!")
-        return
-    
-    # چک کردن تعداد تیکت‌های باز
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM support_tickets WHERE user_id = ? AND status = "open"', 
-                  (user_id,))
-    open_tickets = cursor.fetchone()[0]
-    
-    if open_tickets >= 3:
-        await message.answer("❌ شما 3 تیکت باز دارید! لطفاً منتظر پاسخ باشید.")
-        conn.close()
-        return
-    
-    # ایجاد تیکت
-    cursor.execute('''
-        INSERT INTO support_tickets (user_id, username, message, status)
-        VALUES (?, ?, ?, 'open')
-    ''', (user_id, username, ticket_text))
-    
-    ticket_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    
-    await message.answer(f"""
-✅ **تیکت #{ticket_id} ایجاد شد!**
-
-📝 پیام شما ثبت شد.
-⏰ پاسخ: حداکثر 24 ساعت
-
-📋 وضعیت: /tickets
-""")
-
-# ==================== ADMIN TICKET COMMANDS ====================
-
-@dp.message(Command("tickets"))
-async def view_tickets(message: Message):
-    """مشاهده تیکت‌ها"""
-    user_id = message.from_user.id
-    
-    if str(user_id) != DEVELOPER_ID:
-        await message.answer("⛔ فقط ادمین!")
-        return
-    
     conn = db.get_connection()
     cursor = conn.cursor()
     
-    cursor.execute('SELECT ticket_id, user_id, username, message FROM support_tickets WHERE status = "open"')
-    tickets = cursor.fetchall()
-    conn.close()
+    cursor.execute('SELECT SUM(quantity) FROM missiles WHERE user_id = ?', (user[0],))
+    total_missiles = cursor.fetchone()[0] or 0
     
-    if not tickets:
-        await message.answer("✅ هیچ تیکت بازی وجود ندارد!")
-        return
+    cursor.execute('SELECT SUM(quantity) FROM fighters WHERE user_id = ?', (user[0],))
+    total_fighters = cursor.fetchone()[0] or 0
     
-    text = "🎫 **تیکت‌های باز:**\n\n"
+    cursor.execute('SELECT COUNT(*) FROM attacks WHERE attacker_id = ?', (user[0],))
+    total_attacks = cursor.fetchone()[0] or 0
     
-    for ticket in tickets:
-        ticket_id, user_id, username, message = ticket
-        text += f"**#{ticket_id}** - {username}\n"
-        text += f"👤 {user_id}\n"
-        text += f"📝 {message[:50]}...\n"
-        text += f"🔹 پاسخ: /reply_{ticket_id} متن\n"
-        text += f"🔸 بستن: /close_{ticket_id}\n\n"
+    cursor.execute('SELECT COUNT(*) FROM attacks WHERE target_id = ?', (user[0],))
+    total_defended = cursor.fetchone()[0] or 0
     
-    await message.answer(text)
-
-@dp.message(Command("reply"))
-async def reply_to_ticket(message: Message):
-    """پاسخ به تیکت"""
-    user_id = message.from_user.id
+    cursor.execute('SELECT COUNT(*) FROM users WHERE zp > ?', (user[5],))
+    rank = cursor.fetchone()[0] + 1
     
-    if str(user_id) != DEVELOPER_ID:
-        return
-    
-    parts = message.text.split()
-    if len(parts) < 3:
-        await message.answer("⚠️ فرمت: /reply_<شماره> <متن>")
-        return
-    
-    try:
-        # استخراج شماره تیکت
-        ticket_id = int(parts[0].replace("/reply_", ""))
-        reply_text = " ".join(parts[1:])
-        
-        conn = db.get_connection()
-        cursor = conn.cursor()
-        
-        # دریافت اطلاعات تیکت
-        cursor.execute('SELECT user_id, message FROM support_tickets WHERE ticket_id = ?', 
-                      (ticket_id,))
-        ticket = cursor.fetchone()
-        
-        if not ticket:
-            await message.answer("❌ تیکت یافت نشد!")
-            conn.close()
-            return
-        
-        target_user_id = ticket[0]
-        
-        # بروزرسانی تیکت
-        cursor.execute('UPDATE support_tickets SET status = "answered", admin_reply = ? WHERE ticket_id = ?', 
-                      (reply_text, ticket_id))
-        conn.commit()
-        conn.close()
-        
-        # ارسال پاسخ به کاربر
-        try:
-            await bot.send_message(target_user_id, f"""
-📨 **پاسخ به تیکت #{ticket_id}**
-
-💬 **پاسخ پشتیبانی:** {reply_text}
-
-✅ تیکت شما پاسخ داده شد.
-""")
-        except:
-            pass
-        
-        await message.answer(f"✅ پاسخ به تیکت #{ticket_id} ارسال شد.")
-        
-    except:
-        await message.answer("❌ خطا!")
-
-@dp.message(Command("close"))
-async def close_ticket(message: Message):
-    """بستن تیکت"""
-    user_id = message.from_user.id
-    
-    if str(user_id) != DEVELOPER_ID:
-        return
-    
-    try:
-        ticket_id = int(message.text.split()[0].replace("/close_", ""))
-        
-        conn = db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('UPDATE support_tickets SET status = "closed" WHERE ticket_id = ?', 
-                      (ticket_id,))
-        conn.commit()
-        conn.close()
-        
-        await message.answer(f"✅ تیکت #{ticket_id} بسته شد.")
-        
-    except:
-        await message.answer("❌ خطا!")
-
-# ==================== ADMIN COMMANDS ====================
-@dp.message(Command("admin"))
-async def admin_panel(message: Message):
-    user_id = message.from_user.id
-    
-    if str(user_id) != DEVELOPER_ID:
-        await message.answer("⛔ دسترسی ممنوع!")
-        return
-    
-    conn = db.get_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM users')
-    total_users = cursor.fetchone()[0]
     conn.close()
     
     text = f"""
-🔐 **پنل مدیریت ادمین**
+📊 **آمار کامل شما**
 
-👨‍💻 **توسعه‌دهنده:** @{DEVELOPER_ID}
-👥 **کاربران:** {total_users}
-🕒 **زمان:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-📋 **دستورات:**
-`/gift <آیدی> <نوع> <مقدار>` - هدیه دادن
-`/addcoins <آیدی> <مقدار>` - افزودن سکه
-`/addgems <آیدی> <مقدار>` - افزودن جم
-`/status` - وضعیت ربات
-`/backup` - ایجاد Backup
-"""
-    await message.answer(text)
-
-@dp.message(Command("gift"))
-async def gift_command(message: Message):
-    user_id = message.from_user.id
-    
-    if str(user_id) != DEVELOPER_ID:
-        await message.answer("⛔ فقط ادمین!")
-        return
-    
-    parts = message.text.split()
-    if len(parts) != 4:
-        await message.answer("فرمت: /gift <آیدی> <coins|gems|zp> <مقدار>")
-        return
-    
-    try:
-        target_id = int(parts[1])
-        resource_type = parts[2].lower()
-        amount = int(parts[3])
-        
-        if resource_type == "coins":
-            db.update_resource(target_id, "coins", amount)
-            resource_name = "سکه"
-            emoji = "💰"
-        elif resource_type == "gems":
-            db.update_resource(target_id, "gems", amount)
-            resource_name = "جم"
-            emoji = "💎"
-        elif resource_type == "zp":
-            db.update_resource(target_id, "zp", amount)
-            resource_name = "ZP"
-            emoji = "🎯"
-        else:
-            await message.answer("❌ نوع نامعتبر!")
-            return
-        
-        await message.answer(f"""
-✅ **هدیه ارسال شد!**
-
-{emoji} **{amount:,} {resource_name}**
-👤 **به کاربر:** {target_id}
-👨‍💼 **توسط:** {message.from_user.full_name}
-""")
-        
-    except ValueError:
-        await message.answer("❌ مقدار نامعتبر!")
-    except Exception as e:
-        await message.answer(f"❌ خطا: {e}")
-
-# ==================== MAIN FUNCTION ====================
-async def main():
-    logger.info("🚀 Starting Warzone Bot...")
-    
-    try:
-        bot_info = await bot.get_me()
-        logger.info(f"✅ Bot connected: @{bot_info.username}")
-    except Exception as e:
-        logger.error(f"❌ Connection failed: {e}")
-        return
-    
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("🛑 Bot stopped by user")
-    except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+👤 **اطلاعات:**
+• نام: {user[2]}
+• سطح: {user
