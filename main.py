@@ -22,6 +22,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
 import aiohttp
 from aiohttp import web
 
@@ -45,9 +46,10 @@ if not BOT_TOKEN:
     raise ValueError("لطفا BOT_TOKEN را در .env تنظیم کنید")
 
 # === راه‌اندازی ربات ===
-bot = Bot(token=BOT_TOKEN, parse_mode='HTML')
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
 
 # === States برای FSM ===
 class UserStates(StatesGroup):
