@@ -1473,36 +1473,27 @@ async def web_handler(request):
     """Handler اصلی وب‌سرور"""
     return web.Response(text="🤖 Warzone Bot is running!")
 
-async def start_bot():
-    """شروع ربات"""
+async def main():
+    """تابع اصلی"""
     logger.info("Starting Warzone Bot...")
     
     # Keep-Alive دوره‌ای
     async def keep_alive_task():
         while True:
             await keep_alive()
-            await asyncio.sleep(300)  # هر 5 دقیقه
+            await asyncio.sleep(300)
+    
+    # شروع Keep-Alive
+    asyncio.create_task(keep_alive_task())
+    
+    # راه‌اندازی وب‌سرور
+    runner = web.AppRunner(web.Application())
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
     
     # راه‌اندازی ربات
-    asyncio.create_task(keep_alive_task())
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    # راه‌اندازی وب‌سرور برای Railway
-    app = web.Application()
-    app.router.add_get('/', web_handler)
-    
-    # راه‌اندازی در پس‌زمینه
-    import threading
-    from aiogram.enums import ParseMode
-    
-    def run_bot():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(start_bot())
-    
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    # راه‌اندازی وب‌سرور
-    web.run_app(app, port=PORT, host='0.0.0.0')
+    asyncio.run(main())
