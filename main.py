@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Warzone Telegram Bot - Version 2.0.0
-ربات جنگی کامل - بدون باگ
+Warzone Telegram Bot - Version 3.0.0
+ربات جنگی کامل - با سیستم انتقام
 """
 
 import asyncio
@@ -56,6 +56,7 @@ class UserStates(StatesGroup):
     waiting_for_gift_amount = State()
     waiting_for_broadcast = State()
     admin_panel = State()
+    waiting_for_revenge = State()
 
 # === کلاس دیتابیس ===
 class Database:
@@ -80,18 +81,20 @@ class Database:
             username TEXT,
             full_name TEXT,
             zone_coin INTEGER DEFAULT 1000,
-            zone_gem INTEGER DEFAULT 10,
+            zone_gem INTEGER DEFAULT 0,
             zone_point INTEGER DEFAULT 500,
             level INTEGER DEFAULT 1,
             xp INTEGER DEFAULT 0,
             is_admin BOOLEAN DEFAULT 0,
             miner_level INTEGER DEFAULT 1,
-            last_miner_claim INTEGER,
+            last_miner_claim INTEGER DEFAULT (strftime('%s', 'now')),
             cyber_tower_level INTEGER DEFAULT 0,
             defense_missile_level INTEGER DEFAULT 0,
             defense_electronic_level INTEGER DEFAULT 0,
             defense_antifighter_level INTEGER DEFAULT 0,
             total_defense_bonus REAL DEFAULT 0.0,
+            fighter_level INTEGER DEFAULT 0,
+            last_revenge_time INTEGER DEFAULT 0,
             created_at INTEGER DEFAULT (strftime('%s', 'now'))
         )
         ''')
@@ -114,9 +117,12 @@ class Database:
             attacker_id INTEGER,
             target_id INTEGER,
             attack_type TEXT,
+            missile_name TEXT,
             damage INTEGER,
             loot_coins INTEGER,
             loot_gems INTEGER,
+            can_revenge BOOLEAN DEFAULT 1,
+            revenge_taken BOOLEAN DEFAULT 0,
             timestamp INTEGER DEFAULT (strftime('%s', 'now')),
             FOREIGN KEY (attacker_id) REFERENCES users(user_id),
             FOREIGN KEY (target_id) REFERENCES users(user_id)
@@ -141,9 +147,9 @@ class Database:
         
         # مقدار اولیه موشک‌ها
         initial_missiles = [
-            (user_id, 'شبح (Ghost)', 5),
-            (user_id, 'رعد (Thunder)', 3),
-            (user_id, 'تندر (Boomer)', 1)
+            (user_id, 'شبح', 5),
+            (user_id, 'رعد', 3),
+            (user_id, 'تندر', 1)
         ]
         
         for missile in initial_missiles:
@@ -171,16 +177,16 @@ class Database:
         WHERE user_id = ? AND quantity > 0
         ORDER BY 
             CASE missile_name
-                WHEN 'شبح (Ghost)' THEN 1
-                WHEN 'رعد (Thunder)' THEN 2
-                WHEN 'تندر (Boomer)' THEN 3
-                WHEN 'هاوک (Hawk)' THEN 4
-                WHEN 'پاتریوت (Patriot)' THEN 5
-                WHEN 'شهاب (Meteor)' THEN 6
-                WHEN 'سیل (Tsunami)' THEN 7
-                WHEN 'توفان (Storm)' THEN 8
-                WHEN 'تایفون (Typhoon)' THEN 9
-                WHEN 'آپوکالیپس (Apocalypse)' THEN 10
+                WHEN 'شبح' THEN 1
+                WHEN 'رعد' THEN 2
+                WHEN 'تندر' THEN 3
+                WHEN 'هاوک' THEN 4
+                WHEN 'پاتریوت' THEN 5
+                WHEN 'شهاب' THEN 6
+                WHEN 'سیل' THEN 7
+                WHEN 'توفان' THEN 8
+                WHEN 'تایفون' THEN 9
+                WHEN 'آپوکالیپس' THEN 10
                 ELSE 11
             END
         ''', (user_id,))
@@ -238,7 +244,7 @@ class Database:
                 remaining_xp = current_xp - xp_needed
                 cursor.execute('''
                 UPDATE users 
-                SET xp = ?, level = ?, zone_coin = zone_coin + 1000, zone_gem = zone_gem + 5
+                SET xp = ?, level = ?, zone_coin = zone_coin + 500
                 WHERE user_id = ?
                 ''', (remaining_xp, new_level, user_id))
                 level_up = True
@@ -271,6 +277,63 @@ class Database:
         users = cursor.fetchall()
         conn.close()
         return [dict(u) for u in users]
+    
+    def update_fighter_level(self, user_id: int, amount: int):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE users 
+        SET fighter_level = fighter_level + ? 
+        WHERE user_id = ?
+        ''', (amount, user_id))
+        conn.commit()
+        conn.close()
+    
+    def record_attack(self, attacker_id: int, target_id: int, missile_name: str, damage: int, loot_coins: int, loot_gems: int):
+        """ثبت حمله در دیتابیس"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        INSERT INTO attacks (attacker_id, target_id, missile_name, damage, loot_coins, loot_gems)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''', (attacker_id, target_id, missile_name, damage, loot_coins, loot_gems))
+        attack_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        return attack_id
+    
+    def get_recent_attacks_on_user(self, user_id: int, limit=5):
+        """دریافت آخرین حملات بر روی کاربر"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT a.*, u.username, u.full_name 
+        FROM attacks a
+        JOIN users u ON a.attacker_id = u.user_id
+        WHERE a.target_id = ? AND a.can_revenge = 1 AND a.revenge_taken = 0
+        ORDER BY a.timestamp DESC
+        LIMIT ?
+        ''', (user_id, limit))
+        attacks = cursor.fetchall()
+        conn.close()
+        return [dict(a) for a in attacks]
+    
+    def mark_revenge_taken(self, attack_id: int):
+        """علامت‌گذاری انتقام گرفته شده"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE attacks SET revenge_taken = 1 WHERE id = ?', (attack_id,))
+        conn.commit()
+        conn.close()
+    
+    def update_last_revenge_time(self, user_id: int):
+        """آپدیت زمان آخرین انتقام"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('UPDATE users SET last_revenge_time = ? WHERE user_id = ?', 
+                      (int(time.time()), user_id))
+        conn.commit()
+        conn.close()
 
 # === راه‌اندازی دیتابیس ===
 db = Database()
@@ -278,63 +341,50 @@ db = Database()
 # === داده‌های بازی ===
 MISSILE_DATA = {
     # موشک‌های معمولی
-    'شبح (Ghost)': {'damage': 50, 'price': 200, 'min_level': 1, 'type': 'normal'},
-    'رعد (Thunder)': {'damage': 70, 'price': 500, 'min_level': 2, 'type': 'normal'},
-    'تندر (Boomer)': {'damage': 90, 'price': 1000, 'min_level': 3, 'type': 'normal'},
-    'هاوک (Hawk)': {'damage': 110, 'price': 2000, 'min_level': 4, 'type': 'normal'},
-    'پاتریوت (Patriot)': {'damage': 130, 'price': 5000, 'min_level': 5, 'type': 'normal'},
+    'شبح': {'damage': 25, 'price': 20, 'min_level': 1, 'type': 'normal'},
+    'رعد': {'damage': 35, 'price': 50, 'min_level': 2, 'type': 'normal'},
+    'تندر': {'damage': 45, 'price': 100, 'min_level': 3, 'type': 'normal'},
+    'هاوک': {'damage': 55, 'price': 200, 'min_level': 4, 'type': 'normal'},
+    'پاتریوت': {'damage': 65, 'price': 500, 'min_level': 5, 'type': 'normal'},
     
     # موشک‌های ویژه
-    'شهاب (Meteor)': {'damage': 250, 'price': 25000, 'min_level': 6, 'type': 'special', 'gem_cost': 1},
-    'سیل (Tsunami)': {'damage': 300, 'price': 30000, 'min_level': 7, 'type': 'special', 'gem_cost': 2},
-    'توفان (Storm)': {'damage': 350, 'price': 35000, 'min_level': 8, 'type': 'special', 'gem_cost': 3},
-    'تایفون (Typhoon)': {'damage': 400, 'price': 40000, 'min_level': 9, 'type': 'special', 'gem_cost': 4},
-    'آپوکالیپس (Apocalypse)': {'damage': 500, 'price': 50000, 'min_level': 10, 'type': 'special', 'gem_cost': 5}
-}
-
-ATTACK_COMBOS = {
-    'حمله ساده': {
-        'multiplier': 1.0,
-        'requirements': {'شبح (Ghost)': 1},
-        'min_level': 1,
-        'description': 'نیاز: 1 شبح (Ghost)'
-    },
-    'حمله متوسط': {
-        'multiplier': 1.5,
-        'requirements': {'رعد (Thunder)': 1},
-        'min_level': 2,
-        'description': 'نیاز: 1 رعد (Thunder)'
-    },
-    'حمله پیشرفته': {
-        'multiplier': 2.0,
-        'requirements': {'تندر (Boomer)': 1},
-        'min_level': 3,
-        'description': 'نیاز: 1 تندر (Boomer)'
-    },
-    'حمله ویرانگر': {
-        'multiplier': 5.0,
-        'requirements': {'آپوکالیپس (Apocalypse)': 1, 'zone_gem': 10},
-        'min_level': 10,
-        'description': 'نیاز: 1 آپوکالیپس + 10 جم'
-    }
+    'شهاب': {'damage': 125, 'price': 2500, 'min_level': 6, 'type': 'special', 'gem_cost': 1},
+    'سیل': {'damage': 150, 'price': 3000, 'min_level': 7, 'type': 'special', 'gem_cost': 2},
+    'توفان': {'damage': 175, 'price': 3500, 'min_level': 8, 'type': 'special', 'gem_cost': 3},
+    'تایفون': {'damage': 200, 'price': 4000, 'min_level': 9, 'type': 'special', 'gem_cost': 4},
+    'آپوکالیپس': {'damage': 250, 'price': 5000, 'min_level': 10, 'type': 'special', 'gem_cost': 5}
 }
 
 MINER_LEVELS = {
-    1: {'zp_per_hour': 100, 'upgrade_cost': 100},
-    2: {'zp_per_hour': 200, 'upgrade_cost': 200},
-    3: {'zp_per_hour': 300, 'upgrade_cost': 300},
-    4: {'zp_per_hour': 400, 'upgrade_cost': 400},
-    5: {'zp_per_hour': 500, 'upgrade_cost': 500},
-    6: {'zp_per_hour': 600, 'upgrade_cost': 600},
-    7: {'zp_per_hour': 700, 'upgrade_cost': 700},
-    8: {'zp_per_hour': 800, 'upgrade_cost': 800},
-    9: {'zp_per_hour': 900, 'upgrade_cost': 900},
-    10: {'zp_per_hour': 1000, 'upgrade_cost': 10000},
-    11: {'zp_per_hour': 1100, 'upgrade_cost': 11000},
-    12: {'zp_per_hour': 1200, 'upgrade_cost': 12000},
-    13: {'zp_per_hour': 1300, 'upgrade_cost': 13000},
-    14: {'zp_per_hour': 1400, 'upgrade_cost': 14000},
-    15: {'zp_per_hour': 1500, 'upgrade_cost': 50000}
+    1: {'zp_per_hour': 50, 'upgrade_cost': 50},
+    2: {'zp_per_hour': 100, 'upgrade_cost': 100},
+    3: {'zp_per_hour': 150, 'upgrade_cost': 150},
+    4: {'zp_per_hour': 200, 'upgrade_cost': 200},
+    5: {'zp_per_hour': 250, 'upgrade_cost': 250},
+    6: {'zp_per_hour': 300, 'upgrade_cost': 300},
+    7: {'zp_per_hour': 350, 'upgrade_cost': 350},
+    8: {'zp_per_hour': 400, 'upgrade_cost': 400},
+    9: {'zp_per_hour': 450, 'upgrade_cost': 450},
+    10: {'zp_per_hour': 500, 'upgrade_cost': 1000},
+    11: {'zp_per_hour': 550, 'upgrade_cost': 1100},
+    12: {'zp_per_hour': 600, 'upgrade_cost': 1200},
+    13: {'zp_per_hour': 650, 'upgrade_cost': 1300},
+    14: {'zp_per_hour': 700, 'upgrade_cost': 1400},
+    15: {'zp_per_hour': 750, 'upgrade_cost': 5000}
+}
+
+FIGHTER_LEVELS = {
+    0: {'damage_bonus': 0.0, 'defense_bonus': 0.0, 'upgrade_cost': 100},
+    1: {'damage_bonus': 0.05, 'defense_bonus': 0.02, 'upgrade_cost': 200},
+    2: {'damage_bonus': 0.10, 'defense_bonus': 0.04, 'upgrade_cost': 300},
+    3: {'damage_bonus': 0.15, 'defense_bonus': 0.06, 'upgrade_cost': 400},
+    4: {'damage_bonus': 0.20, 'defense_bonus': 0.08, 'upgrade_cost': 500},
+    5: {'damage_bonus': 0.25, 'defense_bonus': 0.10, 'upgrade_cost': 1000},
+    6: {'damage_bonus': 0.30, 'defense_bonus': 0.12, 'upgrade_cost': 1500},
+    7: {'damage_bonus': 0.35, 'defense_bonus': 0.14, 'upgrade_cost': 2000},
+    8: {'damage_bonus': 0.40, 'defense_bonus': 0.16, 'upgrade_cost': 2500},
+    9: {'damage_bonus': 0.45, 'defense_bonus': 0.18, 'upgrade_cost': 3000},
+    10: {'damage_bonus': 0.50, 'defense_bonus': 0.20, 'upgrade_cost': 5000}
 }
 
 # === توابع کمکی ===
@@ -343,8 +393,9 @@ def create_main_keyboard():
         keyboard=[
             [KeyboardButton(text="👤 پروفایل"), KeyboardButton(text="⚔️ حمله")],
             [KeyboardButton(text="🏪 بازار"), KeyboardButton(text="🎁 باکس")],
-            [KeyboardButton(text="⛏️ ماینر"), KeyboardButton(text="🏰 دفاع")],
-            [KeyboardButton(text="📊 رنکینگ"), KeyboardButton(text="📖 راهنما")]
+            [KeyboardButton(text="⛏️ ماینر"), KeyboardButton(text="✈️ جنگنده")],
+            [KeyboardButton(text="🏰 دفاع"), KeyboardButton(text="📊 رنکینگ")],
+            [KeyboardButton(text="⚡ انتقام"), KeyboardButton(text="🆘 پشتیبانی")]
         ],
         resize_keyboard=True,
         input_field_placeholder="انتخاب کنید..."
@@ -369,14 +420,6 @@ def is_admin(user_id: int):
     """بررسی ادمین بودن کاربر"""
     return user_id in ADMIN_IDS
 
-def get_defense_bonus(defense_levels):
-    """محاسبه بانس دفاع"""
-    total_bonus = 0
-    total_bonus += defense_levels.get('missile', 0) * 0.05
-    total_bonus += defense_levels.get('electronic', 0) * 0.03
-    total_bonus += defense_levels.get('antifighter', 0) * 0.07
-    return min(total_bonus, 0.5)  # حداکثر 50% بانس
-
 # === هندلرهای اصلی ===
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
@@ -391,20 +434,22 @@ async def cmd_start(message: Message):
 🚀 <b>به جنگ‌افزار خوش آمدید {full_name}!</b>
 
 🎮 <i>یک ربات جنگی کامل با قابلیت‌های:</i>
-• ⚔️ سیستم حمله پیشرفته
+• ⚔️ سیستم حمله لول‌دار
 • 🏪 بازار خرید موشک
 • 🎁 باکس‌های مختلف
-• ⛏️ سیستم ماینینگ
+• ⛏️ سیستم ماینینگ دائم
+• ✈️ سیستم جنگنده
 • 🏰 سیستم دفاع
+• ⚡ سیستم انتقام
 • 📊 رنکینگ رقابتی
 
 💰 دارایی اولیه:
 • 1000 سکه
-• 10 جم  
+• 0 جم (جم فقط از باکس ویژه)  
 • 500 ZP
-• 5 موشک شبح (Ghost)
-• 3 موشک رعد (Thunder)
-• 1 موشک تندر (Boomer)
+• 5 موشک شبح
+• 3 موشک رعد
+• 1 موشک تندر
 
 📖 برای شروع از دکمه‌های زیر استفاده کنید:
     """
@@ -420,18 +465,19 @@ async def cmd_profile(message: Message):
         await message.answer("❌ ابتدا با /start ثبت نام کنید!")
         return
     
-    # محاسبه ZP قابل دریافت از ماینر
-    miner_zp = 0
+    # محاسبه ZP قابل دریافت از ماینر (همیشه)
     if user['last_miner_claim']:
         time_passed = int(time.time()) - user['last_miner_claim']
         zp_per_hour = MINER_LEVELS[user['miner_level']]['zp_per_hour']
         miner_zp = int((time_passed / 3600) * zp_per_hour)
+    else:
+        miner_zp = 0
     
     # دریافت موشک‌ها
     missiles = db.get_user_missiles(user_id)
     missiles_text = ""
     if missiles:
-        for missile in missiles[:5]:  # فقط 5 موشک اول
+        for missile in missiles[:5]:
             missiles_text += f"• {missile['missile_name']}: {missile['quantity']}\n"
         if len(missiles) > 5:
             missiles_text += f"• و {len(missiles) - 5} موشک دیگر...\n"
@@ -444,8 +490,8 @@ async def cmd_profile(message: Message):
 🎯 لول: {user['level']}
 ⭐ XP: {user['xp']}/{user['level'] * 100}
 ━━━━━━━━━━━━━━
-💰 سکه: {user['zone_coin']} ZC
-💎 جم: {user['zone_gem']} ZG
+💰 سکه: {user['zone_coin']}
+💎 جم: {user['zone_gem']}
 ⚡ امتیاز: {user['zone_point']} ZP
 ━━━━━━━━━━━━━━
 ⛏️ ماینر: لول {user['miner_level']}
@@ -454,6 +500,7 @@ async def cmd_profile(message: Message):
 💣 موشک‌ها:
 {missiles_text if missiles_text else "• هیچ موشکی ندارید!"}
 ━━━━━━━━━━━━━━
+✈️ جنگنده: لول {user['fighter_level']}
 🏰 سیستم دفاع:
 • 🚀 دفاع موشکی: لول {user['defense_missile_level']}
 • 📡 جنگ الکترونیک: لول {user['defense_electronic_level']}
@@ -467,7 +514,7 @@ async def cmd_profile(message: Message):
     await message.answer(profile_text)
 
 @dp.message(F.text == "⚔️ حمله")
-async def cmd_attack(message: Message, state: FSMContext):
+async def cmd_attack(message: Message):
     user_id = message.from_user.id
     user = db.get_user(user_id)
     
@@ -475,88 +522,104 @@ async def cmd_attack(message: Message, state: FSMContext):
         await message.answer("❌ ابتدا با /start ثبت نام کنید!")
         return
     
-    # ایجاد کیبورد برای انتخاب نوع حمله
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="حمله ساده (1x)", callback_data="attack_simple"),
-            InlineKeyboardButton(text="حمله متوسط (1.5x)", callback_data="attack_medium")
-        ],
-        [
-            InlineKeyboardButton(text="حمله پیشرفته (2x)", callback_data="attack_advanced"),
-            InlineKeyboardButton(text="حمله ویرانگر (5x)", callback_data="attack_nuclear")
-        ],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")]
-    ])
+    missiles = db.get_user_missiles(user_id)
     
-    attack_info = """
-⚔️ <b>انتخاب نوع حمله:</b>
+    if not missiles:
+        await message.answer("""
+❌ <b>شما هیچ موشکی ندارید!</b>
+
+🏪 برای خرید موشک به بازار بروید:
+• شبح - 20 سکه
+• رعد - 50 سکه
+• تندر - 100 سکه
+        """)
+        return
+    
+    keyboard_buttons = []
+    row = []
+    
+    for i, missile in enumerate(missiles):
+        if i > 0 and i % 2 == 0:
+            keyboard_buttons.append(row)
+            row = []
+        
+        missile_name = missile['missile_name']
+        quantity = missile['quantity']
+        row.append(InlineKeyboardButton(
+            text=f"{missile_name} ({quantity})", 
+            callback_data=f"attack_with_{missile_name}"
+        ))
+    
+    if row:
+        keyboard_buttons.append(row)
+    
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    
+    attack_info = f"""
+⚔️ <b>حمله لول‌دار</b>
 ━━━━━━━━━━━━━━
-1. حمله ساده
-   • ضریب: 1x
-   • نیاز: 1 موشک شبح (Ghost)
-   
-2. حمله متوسط  
-   • ضریب: 1.5x
-   • نیاز: 1 موشک رعد (Thunder)
-   
-3. حمله پیشرفته
-   • ضریب: 2x
-   • نیاز: 1 موشک تندر (Boomer)
-   
-4. حمله ویرانگر
-   • ضریب: 5x
-   • نیاز: 1 موشک آپوکالیپس + 10 جم
+🎯 لول شما: {user['level']}
+
+📝 <b>روش حمله:</b>
+1. روی پیام کاربر مورد نظر <b>ریپلای (Reply)</b> کنید
+2. سپس بنویسید: حمله با [نام موشک]
+
+💡 <b>مثال:</b>
+حمله با شبح
+
+📊 <b>موشک‌های شما:</b>
     """
     
     await message.answer(attack_info, reply_markup=keyboard)
 
-@dp.callback_query(F.data.startswith("attack_"))
-async def process_attack_type(callback: CallbackQuery, state: FSMContext):
-    attack_type = callback.data.replace("attack_", "")
+@dp.callback_query(F.data.startswith("attack_with_"))
+async def process_attack_with_missile(callback: CallbackQuery):
+    missile_name = callback.data.replace("attack_with_", "")
     
-    attack_map = {
-        'simple': 'حمله ساده',
-        'medium': 'حمله متوسط',
-        'advanced': 'حمله پیشرفته',
-        'nuclear': 'حمله ویرانگر'
-    }
-    
-    attack_name = attack_map.get(attack_type)
-    
-    # ذخیره نوع حمله
-    await state.update_data(attack_type=attack_type, attack_name=attack_name)
-    await state.set_state(UserStates.waiting_for_target_reply)
+    missile_data = MISSILE_DATA.get(missile_name, {})
+    damage = missile_data.get('damage', 0)
     
     await callback.message.edit_text(f"""
-🎯 <b>انتخاب هدف</b>
-━━━━━━━━━━━━━━
-نوع حمله: {attack_name}
+💣 <b>موشک انتخاب شد:</b> {missile_name}
+💥 قدرت: {damage} آسیب
 
 📝 <b>روش حمله:</b>
 1. روی پیام کاربر مورد نظر <b>ریپلای (Reply)</b> کنید
-2. سپس دستور /attack را بنویسید
+2. سپس بنویسید: حمله با {missile_name}
 
 ⚠️ نکته: فقط می‌توانید به کاربرانی حمله کنید که در ربات ثبت‌نام کرده‌اند.
     """)
+    
     await callback.answer()
 
-@dp.message(Command("attack"))
-@dp.message(F.text == "/attack")
-async def cmd_attack_reply(message: Message, state: FSMContext):
-    """حمله با ریپلای"""
-    
-    # بررسی ریپلای
+@dp.message(F.text.startswith("حمله با"))
+async def cmd_attack_with_missile(message: Message):
     if not message.reply_to_message:
         await message.answer("""
 ❌ <b>روش صحیح حمله:</b>
 1. روی پیام کاربر مورد نظر <b>ریپلای (Reply)</b> کنید
-2. سپس دستور /attack را بنویسید
+2. سپس بنویسید: "حمله با [نام موشک]"
 
-⚠️ یا از منوی ⚔️ حمله استفاده کنید.
+مثال: حمله با شبح
         """)
         return
     
-    # دریافت اطلاعات حمله‌کننده
+    missile_name = message.text.replace("حمله با", "").strip()
+    
+    if not missile_name or missile_name not in MISSILE_DATA:
+        await message.answer(f"""
+❌ <b>موشک نامعتبر!</b>
+
+موشک‌های معتبر:
+• شبح • رعد • تندر • هاوک • پاتریوت
+• شهاب • سیل • توفان • تایفون • آپوکالیپس
+
+مثال: حمله با شبح
+        """)
+        return
+    
     attacker_id = message.from_user.id
     attacker = db.get_user(attacker_id)
     
@@ -564,63 +627,28 @@ async def cmd_attack_reply(message: Message, state: FSMContext):
         await message.answer("❌ ابتدا با /start ثبت نام کنید!")
         return
     
-    # دریافت اطلاعات هدف از ریپلای
     target_user = message.reply_to_message.from_user
     target_id = target_user.id
     
-    # بررسی حمله به خود
     if target_id == attacker_id:
         await message.answer("❌ نمی‌توانید به خود حمله کنید!")
         return
     
-    # بررسی وجود هدف در دیتابیس
     target = db.get_user(target_id)
     if not target:
         await message.answer("❌ کاربر هدف در ربات ثبت‌نام نکرده است!")
         return
     
-    # درخواست نوع حمله
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="حمله ساده", callback_data=f"quick_attack_simple_{target_id}"),
-            InlineKeyboardButton(text="حمله متوسط", callback_data=f"quick_attack_medium_{target_id}")
-        ],
-        [
-            InlineKeyboardButton(text="حمله پیشرفته", callback_data=f"quick_attack_advanced_{target_id}"),
-            InlineKeyboardButton(text="حمله ویرانگر", callback_data=f"quick_attack_nuclear_{target_id}")
-        ]
-    ])
+    missiles = db.get_user_missiles(attacker_id)
+    missile_qty = next((m['quantity'] for m in missiles if m['missile_name'] == missile_name), 0)
     
-    await message.answer(f"""
-🎯 <b>هدف انتخاب شد:</b>
-━━━━━━━━━━━━━━
-👤 نام: {target_user.full_name}
-🆔 آیدی: {target_id}
+    if missile_qty < 1:
+        await message.answer(f"❌ {missile_name} کافی ندارید!")
+        return
+    
+    await execute_missile_attack(attacker_id, target_id, missile_name, message)
 
-📊 <b>انتخاب نوع حمله:</b>
-    """, reply_markup=keyboard)
-
-@dp.callback_query(F.data.startswith("quick_attack_"))
-async def process_quick_attack(callback: CallbackQuery):
-    """پردازش حمله سریع"""
-    try:
-        # استخراج اطلاعات از callback_data
-        parts = callback.data.split("_")
-        attack_type = parts[2]  # simple, medium, advanced, nuclear
-        target_id = int(parts[3])
-        
-        attacker_id = callback.from_user.id
-        
-        # انجام حمله
-        await execute_attack(attacker_id, target_id, attack_type, callback.message)
-        await callback.answer()
-        
-    except Exception as e:
-        logger.error(f"Quick attack error: {e}")
-        await callback.answer("❌ خطا در انجام حمله!")
-
-async def execute_attack(attacker_id: int, target_id: int, attack_type: str, message_obj):
-    """انجام حمله"""
+async def execute_missile_attack(attacker_id: int, target_id: int, missile_name: str, message_obj):
     attacker = db.get_user(attacker_id)
     target = db.get_user(target_id)
     
@@ -628,122 +656,487 @@ async def execute_attack(attacker_id: int, target_id: int, attack_type: str, mes
         await message_obj.answer("❌ کاربر یافت نشد!")
         return
     
-    # بررسی حمله به خود
     if attacker_id == target_id:
         await message_obj.answer("❌ نمی‌توانید به خود حمله کنید!")
         return
     
-    # انتخاب combo
-    combo_map = {
-        'simple': ATTACK_COMBOS['حمله ساده'],
-        'medium': ATTACK_COMBOS['حمله متوسط'],
-        'advanced': ATTACK_COMBOS['حمله پیشرفته'],
-        'nuclear': ATTACK_COMBOS['حمله ویرانگر']
-    }
+    missile_data = MISSILE_DATA.get(missile_name)
     
-    combo = combo_map.get(attack_type)
-    
-    if not combo:
-        await message_obj.answer("❌ نوع حمله نامعتبر!")
+    if not missile_data:
+        await message_obj.answer("❌ موشک نامعتبر!")
         return
     
-    # بررسی سطح
-    if attacker['level'] < combo['min_level']:
-        await message_obj.answer(f"❌ برای این حمله حداقل لول {combo['min_level']} نیاز دارید!")
+    if attacker['level'] < missile_data['min_level']:
+        await message_obj.answer(f"❌ برای این موشک حداقل لول {missile_data['min_level']} نیاز دارید!")
         return
     
-    # بررسی نیازمندی‌ها
-    for req, amount in combo['requirements'].items():
-        if req in MISSILE_DATA:
-            # بررسی موشک
-            missiles = db.get_user_missiles(attacker_id)
-            missile_qty = next((m['quantity'] for m in missiles if m['missile_name'] == req), 0)
-            if missile_qty < amount:
-                await message_obj.answer(f"❌ {req} کافی ندارید! (نیاز: {amount})")
-                return
-        elif req == 'zone_gem':
-            if attacker['zone_gem'] < amount:
-                await message_obj.answer(f"❌ جم کافی ندارید! (نیاز: {amount})")
-                return
+    if missile_data['type'] == 'special' and missile_data.get('gem_cost', 0) > 0:
+        if attacker['zone_gem'] < missile_data['gem_cost']:
+            await message_obj.answer(f"❌ جم کافی ندارید! نیاز: {missile_data['gem_cost']} جم")
+            return
     
-    # محاسبه خسارت با در نظر گرفتن دفاع
-    base_damage = 100 + (attacker['level'] * 10)
-    actual_damage = int(base_damage * combo['multiplier'] * (1 - target['total_defense_bonus']))
+    # محاسبه خسارت
+    base_damage = missile_data['damage']
+    fighter_bonus = FIGHTER_LEVELS.get(attacker['fighter_level'], {}).get('damage_bonus', 0)
     
-    # محاسبه غنیمت (حداکثر 15% از دارایی هدف)
-    loot_coins = min(int(target['zone_coin'] * 0.15), 5000)
-    loot_gems = min(int(target['zone_gem'] * 0.10), 50)
+    # بانس اضافی برای انتقام (اگر کاربر تحت حمله بوده)
+    revenge_bonus = 0.0
+    if target['last_revenge_time'] > 0:
+        time_since_revenge = time.time() - target['last_revenge_time']
+        if time_since_revenge < 3600:  # 1 ساعت
+            revenge_bonus = 0.2  # 20% بانس اضافی
     
-    # کسر منابع از هدف (حداقل صفر)
+    actual_damage = int(base_damage * (1 + fighter_bonus + revenge_bonus) * (1 - target['total_defense_bonus']))
+    
+    # محاسبه غنیمت
+    loot_coins = min(int(target['zone_coin'] * 0.10), 1000)
+    loot_gems = min(int(target['zone_gem'] * 0.05), 5)
+    
+    # کسر و اضافه منابع
     new_target_coins = max(target['zone_coin'] - loot_coins, 0)
     new_target_gems = max(target['zone_gem'] - loot_gems, 0)
     
     db.update_user_coins(target_id, -loot_coins)
     db.update_user_gems(target_id, -loot_gems)
-    
-    # اضافه کردن منابع به حمله‌کننده
     db.update_user_coins(attacker_id, loot_coins)
     db.update_user_gems(attacker_id, loot_gems)
     
-    # کسر موشک‌ها
-    for req, amount in combo['requirements'].items():
-        if req in MISSILE_DATA:
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-            UPDATE user_missiles 
-            SET quantity = quantity - ? 
-            WHERE user_id = ? AND missile_name = ?
-            ''', (amount, attacker_id, req))
-            conn.commit()
-            conn.close()
+    # کسر موشک
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    UPDATE user_missiles 
+    SET quantity = quantity - 1 
+    WHERE user_id = ? AND missile_name = ?
+    ''', (attacker_id, missile_name))
+    conn.commit()
+    conn.close()
+    
+    # کسر جم برای موشک‌های ویژه
+    if missile_data['type'] == 'special' and missile_data.get('gem_cost', 0) > 0:
+        db.update_user_gems(attacker_id, -missile_data['gem_cost'])
     
     # اضافه کردن XP
-    level_up, new_level = db.add_xp(attacker_id, 50)
+    xp_gained = missile_data['damage'] // 5
+    level_up, new_level = db.add_xp(attacker_id, xp_gained)
     
-    # ارسال گزارش به حمله‌کننده
-    attack_names = {
-        'simple': 'حمله ساده',
-        'medium': 'حمله متوسط',
-        'advanced': 'حمله پیشرفته',
-        'nuclear': 'حمله ویرانگر'
-    }
+    # ثبت حمله برای انتقام
+    db.record_attack(attacker_id, target_id, missile_name, actual_damage, loot_coins, loot_gems)
+    
+    # ارسال گزارش
+    bonus_text = ""
+    if fighter_bonus > 0:
+        bonus_text += f"\n✈️ بانس جنگنده: +{fighter_bonus*100:.0f}%"
+    if revenge_bonus > 0:
+        bonus_text += f"\n⚡ بانس انتقام: +{revenge_bonus*100:.0f}%"
     
     report_text = f"""
 🎯 <b>حمله موفق!</b>
 ━━━━━━━━━━━━━━
 ⚔️ حمله‌کننده: {attacker['full_name']}
 🎯 هدف: {target['full_name']}
-💥 نوع حمله: {attack_names[attack_type]}
-🛡️ کاهش بانس دفاع: {target['total_defense_bonus']*100:.1f}%
-💢 خسارت وارد شده: {actual_damage}
+💣 موشک: {missile_name}
+💢 قدرت پایه: {missile_data['damage']} آسیب{bonus_text}
+🛡️ کاهش دفاع: {target['total_defense_bonus']*100:.1f}%
+💥 خسارت نهایی: {actual_damage}
 ━━━━━━━━━━━━━━
-💰 غنیمت سکه: {loot_coins} ZC
-💎 غنیمت جم: {loot_gems} ZG
-━━━━━━━━━━━━━━
-⭐ XP کسب شده: 50
+💰 غنیمت سکه: {loot_coins}
+💎 غنیمت جم: {loot_gems}
+⭐ XP کسب شده: {xp_gained}
 {'🎉 سطح شما افزایش یافت!' if level_up else ''}
     """
     
     await message_obj.answer(report_text)
     
-    # اطلاع به هدف
+    # اطلاع به هدف با دکمه انتقام
     try:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ انتقام بگیر", callback_data=f"revenge_{attacker_id}")]
+        ])
+        
         target_report = f"""
 🚨 <b>تحت حمله قرار گرفتید!</b>
 ━━━━━━━━━━━━━━
 ⚔️ حمله‌کننده: {attacker['full_name']}
+💣 موشک: {missile_name}
 💢 خسارت: {actual_damage}
 💰 سکه از دست رفته: {loot_coins}
 💎 جم از دست رفته: {loot_gems}
 🛡️ دفاع شما {target['total_defense_bonus']*100:.1f}% خسارت را کاهش داد
-📊 موجودی جدید:
-• سکه: {new_target_coins} ZC
-• جم: {new_target_gems} ZG
+━━━━━━━━━━━━━━
+⚡ <b>شما می‌توانید انتقام بگیرید!</b>
+• تا ۱ ساعت فرصت دارید
+• ۲۰% بانس آسیب اضافی
+• XP دو برابر
         """
-        await bot.send_message(target_id, target_report)
+        await bot.send_message(target_id, target_report, reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Failed to send attack report to target: {e}")
+
+@dp.message(F.text == "⚡ انتقام")
+async def cmd_revenge(message: Message):
+    """نمایش لیست حملات برای انتقام"""
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await message.answer("❌ ابتدا با /start ثبت نام کنید!")
+        return
+    
+    # دریافت آخرین حملات
+    recent_attacks = db.get_recent_attacks_on_user(user_id, limit=10)
+    
+    if not recent_attacks:
+        await message.answer("""
+📭 <b>هیچ حمله‌ای برای انتقام وجود ندارد!</b>
+
+⚠️ شما می‌توانید فقط به حملات اخیر انتقام بگیرید:
+• حداکثر ۱۰ حمله آخر
+• فقط حملاتی که انتقام نگرفته‌اید
+• تا ۲۴ ساعت پس از حمله
+        """)
+        return
+    
+    keyboard_buttons = []
+    
+    for attack in recent_attacks[:8]:  # حداکثر 8 حمله
+        attacker_name = attack['full_name'] or attack['username'] or "ناشناس"
+        time_ago = int(time.time()) - attack['timestamp']
+        hours_ago = time_ago // 3600
+        
+        if hours_ago > 24:
+            continue  # فقط حملات کمتر از 24 ساعت
+        
+        button_text = f"{attacker_name[:15]} - {hours_ago}ساعت پیش"
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"revenge_attack_{attack['id']}"
+            )
+        ])
+    
+    if not keyboard_buttons:
+        await message.answer("⏳ تمام حملات قدیمی شده‌اند یا انتقام گرفته شده‌اند.")
+        return
+    
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    
+    revenge_info = f"""
+⚡ <b>لیست حملات برای انتقام</b>
+━━━━━━━━━━━━━━
+🎯 شما می‌توانید به {len(keyboard_buttons)-1} حمله انتقام بگیرید
+
+💡 <b>مزایای انتقام:</b>
+• ۲۰٪ آسیب بیشتر
+• XP دو برابر
+• رضایت روانی!
+
+⚠️ <b>محدودیت‌ها:</b>
+• فقط تا ۲۴ ساعت فرصت دارید
+• هر حمله فقط یک بار انتقام
+• نیاز به موشک دارید
+        """
+    
+    await message.answer(revenge_info, reply_markup=keyboard)
+
+@dp.callback_query(F.data.startswith("revenge_attack_"))
+async def process_revenge_attack(callback: CallbackQuery):
+    """پردازش انتخاب حمله برای انتقام"""
+    attack_id = int(callback.data.replace("revenge_attack_", ""))
+    
+    # دریافت اطلاعات حمله
+    conn = db.get_connection()
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT a.*, u.username, u.full_name 
+    FROM attacks a
+    JOIN users u ON a.attacker_id = u.user_id
+    WHERE a.id = ? AND a.can_revenge = 1 AND a.revenge_taken = 0
+    ''', (attack_id,))
+    attack = cursor.fetchone()
+    conn.close()
+    
+    if not attack:
+        await callback.answer("❌ این حمله برای انتقام موجود نیست!")
+        return
+    
+    attacker_name = attack['full_name'] or attack['username'] or "ناشناس"
+    time_ago = int(time.time()) - attack['timestamp']
+    hours_ago = time_ago // 3600
+    
+    if hours_ago > 24:
+        await callback.answer("❌ زمان انتقام گذشته است (بیشتر از 24 ساعت)")
+        return
+    
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    
+    # دریافت موشک‌های کاربر برای انتقام
+    missiles = db.get_user_missiles(user_id)
+    
+    if not missiles:
+        await callback.answer("❌ برای انتقام نیاز به موشک دارید!")
+        return
+    
+    keyboard_buttons = []
+    row = []
+    
+    for i, missile in enumerate(missiles):
+        if i > 0 and i % 2 == 0:
+            keyboard_buttons.append(row)
+            row = []
+        
+        missile_name = missile['missile_name']
+        quantity = missile['quantity']
+        row.append(InlineKeyboardButton(
+            text=f"{missile_name} ({quantity})", 
+            callback_data=f"revenge_with_{attack_id}_{missile_name}"
+        ))
+    
+    if row:
+        keyboard_buttons.append(row)
+    
+    keyboard_buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    
+    revenge_text = f"""
+⚡ <b>انتقام از:</b> {attacker_name}
+🕐 زمان حمله: {hours_ago} ساعت پیش
+💢 خسارت دریافتی: {attack['damage']} آسیب
+💰 سکه از دست رفته: {attack['loot_coins']}
+💎 جم از دست رفته: {attack['loot_gems']}
+
+💣 <b>انتخاب موشک برای انتقام:</b>
+    """
+    
+    await callback.message.edit_text(revenge_text, reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("revenge_with_"))
+async def execute_revenge(callback: CallbackQuery):
+    """انجام انتقام"""
+    try:
+        parts = callback.data.split("_")
+        attack_id = int(parts[2])
+        missile_name = parts[3]
+        
+        user_id = callback.from_user.id
+        user = db.get_user(user_id)
+        
+        if not user:
+            await callback.answer("❌ کاربر یافت نشد!")
+            return
+        
+        # دریافت اطلاعات حمله اصلی
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT a.*, u.username, u.full_name 
+        FROM attacks a
+        JOIN users u ON a.attacker_id = u.user_id
+        WHERE a.id = ? AND a.can_revenge = 1 AND a.revenge_taken = 0
+        ''', (attack_id,))
+        original_attack = cursor.fetchone()
+        conn.close()
+        
+        if not original_attack:
+            await callback.answer("❌ این حمله برای انتقام موجود نیست!")
+            return
+        
+        attacker_id = original_attack['attacker_id']
+        attacker = db.get_user(attacker_id)
+        
+        if not attacker:
+            await callback.answer("❌ حمله‌کننده یافت نشد!")
+            return
+        
+        # بررسی موجودی موشک
+        missiles = db.get_user_missiles(user_id)
+        missile_qty = next((m['quantity'] for m in missiles if m['missile_name'] == missile_name), 0)
+        
+        if missile_qty < 1:
+            await callback.answer(f"❌ {missile_name} کافی ندارید!")
+            return
+        
+        missile_data = MISSILE_DATA.get(missile_name)
+        
+        if not missile_data:
+            await callback.answer("❌ موشک نامعتبر!")
+            return
+        
+        # محاسبه خسارت انتقام (20% بیشتر + بانس جنگنده)
+        base_damage = missile_data['damage']
+        fighter_bonus = FIGHTER_LEVELS.get(user['fighter_level'], {}).get('damage_bonus', 0)
+        revenge_bonus = 0.2  # 20% بانس انتقام
+        
+        actual_damage = int(base_damage * (1 + fighter_bonus + revenge_bonus) * (1 - attacker['total_defense_bonus']))
+        
+        # محاسبه غنیمت (50% بیشتر از معمول)
+        loot_coins = min(int(attacker['zone_coin'] * 0.15), 1500)  # 15% به جای 10%
+        loot_gems = min(int(attacker['zone_gem'] * 0.075), 8)      # 7.5% به جای 5%
+        
+        # کسر و اضافه منابع
+        new_attacker_coins = max(attacker['zone_coin'] - loot_coins, 0)
+        new_attacker_gems = max(attacker['zone_gem'] - loot_gems, 0)
+        
+        db.update_user_coins(attacker_id, -loot_coins)
+        db.update_user_gems(attacker_id, -loot_gems)
+        db.update_user_coins(user_id, loot_coins)
+        db.update_user_gems(user_id, loot_gems)
+        
+        # کسر موشک
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE user_missiles 
+        SET quantity = quantity - 1 
+        WHERE user_id = ? AND missile_name = ?
+        ''', (user_id, missile_name))
+        conn.commit()
+        conn.close()
+        
+        # کسر جم برای موشک‌های ویژه
+        if missile_data['type'] == 'special' and missile_data.get('gem_cost', 0) > 0:
+            db.update_user_gems(user_id, -missile_data['gem_cost'])
+        
+        # اضافه کردن XP (دو برابر)
+        xp_gained = (missile_data['damage'] // 5) * 2
+        level_up, new_level = db.add_xp(user_id, xp_gained)
+        
+        # علامت‌گذاری انتقام گرفته شده
+        db.mark_revenge_taken(attack_id)
+        db.update_last_revenge_time(user_id)
+        
+        # ارسال گزارش
+        report_text = f"""
+⚡ <b>انتقام موفق!</b>
+━━━━━━━━━━━━━━
+🎯 انتقام‌گیرنده: {user['full_name']}
+⚔️ هدف: {attacker['full_name']}
+💣 موشک: {missile_name}
+💢 قدرت پایه: {missile_data['damage']} آسیب
+✈️ بانس جنگنده: +{fighter_bonus*100:.0f}%
+⚡ بانس انتقام: +{revenge_bonus*100:.0f}%
+🛡️ کاهش دفاع: {attacker['total_defense_bonus']*100:.1f}%
+💥 خسارت نهایی: {actual_damage}
+━━━━━━━━━━━━━━
+💰 غنیمت سکه: {loot_coins} (50% بیشتر)
+💎 غنیمت جم: {loot_gems} (50% بیشتر)
+⭐ XP کسب شده: {xp_gained} (دو برابر)
+{'🎉 سطح شما افزایش یافت!' if level_up else ''}
+━━━━━━━━━━━━━━
+✅ انتقام شما ثبت شد و هدف مطلع خواهد شد.
+        """
+        
+        await callback.message.edit_text(report_text)
+        await callback.answer("✅ انتقام با موفقیت انجام شد!")
+        
+        # اطلاع به هدف انتقام
+        try:
+            target_report = f"""
+⚡ <b>از شما انتقام گرفته شد!</b>
+━━━━━━━━━━━━━━
+🎯 انتقام‌گیرنده: {user['full_name']}
+💢 خسارت: {actual_damage}
+💰 سکه از دست رفته: {loot_coins}
+💎 جم از دست رفته: {loot_gems}
+📊 موجودی جدید:
+• سکه: {new_attacker_coins}
+• جم: {new_attacker_gems}
+━━━━━━━━━━━━━━
+⚠️ این انتقام برای حمله شما به {user['full_name']} بود.
+            """
+            await bot.send_message(attacker_id, target_report)
+        except Exception as e:
+            logger.error(f"Failed to send revenge report to target: {e}")
+    
+    except Exception as e:
+        logger.error(f"Revenge error: {e}")
+        await callback.answer("❌ خطا در انجام انتقام!")
+
+@dp.callback_query(F.data.startswith("revenge_"))
+async def quick_revenge(callback: CallbackQuery):
+    """انتقام سریع از پیام حمله"""
+    try:
+        attacker_id = int(callback.data.replace("revenge_", ""))
+        user_id = callback.from_user.id
+        
+        # بررسی اینکه آیا حمله اخیرا اتفاق افتاده
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT * FROM attacks 
+        WHERE attacker_id = ? AND target_id = ? 
+        ORDER BY timestamp DESC 
+        LIMIT 1
+        ''', (attacker_id, user_id))
+        recent_attack = cursor.fetchone()
+        conn.close()
+        
+        if not recent_attack:
+            await callback.answer("❌ حمله‌ای برای انتقام پیدا نشد!")
+            return
+        
+        # ادامه مانند انتقام معمولی
+        await execute_revenge_from_attack(user_id, attacker_id, recent_attack['id'], callback)
+        
+    except Exception as e:
+        logger.error(f"Quick revenge error: {e}")
+        await callback.answer("❌ خطا در انتقام سریع!")
+
+async def execute_revenge_from_attack(user_id: int, attacker_id: int, attack_id: int, callback: CallbackQuery):
+    """انجام انتقام از یک حمله خاص"""
+    user = db.get_user(user_id)
+    attacker = db.get_user(attacker_id)
+    
+    if not user or not attacker:
+        await callback.answer("❌ کاربر یافت نشد!")
+        return
+    
+    # دریافت موشک‌های کاربر
+    missiles = db.get_user_missiles(user_id)
+    
+    if not missiles:
+        await callback.answer("❌ برای انتقام نیاز به موشک دارید!")
+        return
+    
+    keyboard_buttons = []
+    row = []
+    
+    for i, missile in enumerate(missiles[:8]):  # حداکثر 8 موشک
+        if i > 0 and i % 2 == 0:
+            keyboard_buttons.append(row)
+            row = []
+        
+        missile_name = missile['missile_name']
+        quantity = missile['quantity']
+        row.append(InlineKeyboardButton(
+            text=f"{missile_name} ({quantity})", 
+            callback_data=f"revenge_with_{attack_id}_{missile_name}"
+        ))
+    
+    if row:
+        keyboard_buttons.append(row)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+    
+    revenge_text = f"""
+⚡ <b>انتقام سریع</b>
+━━━━━━━━━━━━━━
+🎯 هدف: {attacker['full_name']}
+💢 خسارت دریافتی: اخیراً
+
+💣 <b>انتخاب موشک برای انتقام:</b>
+• ۲۰٪ آسیب بیشتر
+• XP دو برابر
+• رضایت کامل!
+    """
+    
+    await callback.message.edit_text(revenge_text, reply_markup=keyboard)
+    await callback.answer()
 
 @dp.message(F.text == "🏪 بازار")
 async def cmd_market(message: Message):
@@ -754,30 +1147,27 @@ async def cmd_market(message: Message):
         await message.answer("❌ ابتدا با /start ثبت نام کنید!")
         return
     
-    # دریافت موشک‌های کاربر
     user_missiles = db.get_user_missiles(user_id)
     user_missiles_dict = {m['missile_name']: m['quantity'] for m in user_missiles}
     
-    # ایجاد کیبورد برای بازار
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="شبح (Ghost)", callback_data="buy_ghost"),
-            InlineKeyboardButton(text="رعد (Thunder)", callback_data="buy_thunder")
+            InlineKeyboardButton(text="شبح", callback_data="buy_ghost"),
+            InlineKeyboardButton(text="رعد", callback_data="buy_thunder")
         ],
         [
-            InlineKeyboardButton(text="تندر (Boomer)", callback_data="buy_boomer"),
-            InlineKeyboardButton(text="هاوک (Hawk)", callback_data="buy_hawk")
+            InlineKeyboardButton(text="تندر", callback_data="buy_boomer"),
+            InlineKeyboardButton(text="هاوک", callback_data="buy_hawk")
         ],
         [
-            InlineKeyboardButton(text="پاتریوت (Patriot)", callback_data="buy_patriot"),
-            InlineKeyboardButton(text="⏩ موشک‌های ویژه", callback_data="market_special")
+            InlineKeyboardButton(text="پاتریوت", callback_data="buy_patriot"),
+            InlineKeyboardButton(text="⏩ ویژه", callback_data="market_special")
         ],
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")]
     ])
     
-    # نمایش موجودی موشک‌ها
     missiles_text = ""
-    common_missiles = ['شبح (Ghost)', 'رعد (Thunder)', 'تندر (Boomer)']
+    common_missiles = ['شبح', 'رعد', 'تندر']
     for missile_name in common_missiles:
         qty = user_missiles_dict.get(missile_name, 0)
         missiles_text += f"• {missile_name}: {qty} عدد\n"
@@ -785,8 +1175,8 @@ async def cmd_market(message: Message):
     market_text = f"""
 🏪 <b>بازار جنگ‌افزار</b>
 ━━━━━━━━━━━━━━
-💰 سکه شما: {user['zone_coin']} ZC
-💎 جم شما: {user['zone_gem']} ZG
+💰 سکه شما: {user['zone_coin']}
+💎 جم شما: {user['zone_gem']}
 🎯 لول: {user['level']}
 ━━━━━━━━━━━━━━
 📊 <b>موشک‌های شما:</b>
@@ -794,29 +1184,29 @@ async def cmd_market(message: Message):
 ━━━━━━━━━━━━━━
 📦 <b>موشک‌های معمولی:</b>
 
-1. شبح (Ghost)
-   • قدرت: 50 آسیب
-   • قیمت: 200 ZC
+1. شبح
+   • قدرت: 25 آسیب
+   • قیمت: 20 سکه
    • نیاز لول: 1
 
-2. رعد (Thunder)
-   • قدرت: 70 آسیب  
-   • قیمت: 500 ZC
+2. رعد
+   • قدرت: 35 آسیب  
+   • قیمت: 50 سکه
    • نیاز لول: 2
 
-3. تندر (Boomer)
-   • قدرت: 90 آسیب
-   • قیمت: 1000 ZC
+3. تندر
+   • قدرت: 45 آسیب
+   • قیمت: 100 سکه
    • نیاز لول: 3
 
-4. هاوک (Hawk)
-   • قدرت: 110 آسیب
-   • قیمت: 2000 ZC
+4. هاوک
+   • قدرت: 55 آسیب
+   • قیمت: 200 سکه
    • نیاز لول: 4
 
-5. پاتریوت (Patriot)
-   • قدرت: 130 آسیب
-   • قیمت: 5000 ZC
+5. پاتریوت
+   • قدرت: 65 آسیب
+   • قیمت: 500 سکه
    • نیاز لول: 5
     """
     
@@ -829,51 +1219,51 @@ async def cmd_market_special(callback: CallbackQuery):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="شهاب (Meteor)", callback_data="buy_meteor"),
-            InlineKeyboardButton(text="سیل (Tsunami)", callback_data="buy_tsunami")
+            InlineKeyboardButton(text="شهاب", callback_data="buy_meteor"),
+            InlineKeyboardButton(text="سیل", callback_data="buy_tsunami")
         ],
         [
-            InlineKeyboardButton(text="توفان (Storm)", callback_data="buy_storm"),
-            InlineKeyboardButton(text="تایفون (Typhoon)", callback_data="buy_typhoon")
+            InlineKeyboardButton(text="توفان", callback_data="buy_storm"),
+            InlineKeyboardButton(text="تایفون", callback_data="buy_typhoon")
         ],
         [
-            InlineKeyboardButton(text="آپوکالیپس (Apocalypse)", callback_data="buy_apocalypse"),
-            InlineKeyboardButton(text="⏪ موشک‌های معمولی", callback_data="market_normal")
+            InlineKeyboardButton(text="آپوکالیپس", callback_data="buy_apocalypse"),
+            InlineKeyboardButton(text="⏪ معمولی", callback_data="market_normal")
         ]
     ])
     
     special_text = f"""
 💎 <b>موشک‌های ویژه</b>
 ━━━━━━━━━━━━━━
-💰 سکه شما: {user['zone_coin']} ZC
-💎 جم شما: {user['zone_gem']} ZG
+💰 سکه شما: {user['zone_coin']}
+💎 جم شما: {user['zone_gem']}
 🎯 لول: {user['level']}
 ━━━━━━━━━━━━━━
 💣 <b>موشک‌های ویژه:</b>
 
-1. شهاب (Meteor)
-   • قدرت: 250 آسیب
-   • قیمت: 25,000 ZC + 1 جم
+1. شهاب
+   • قدرت: 125 آسیب
+   • قیمت: 2,500 سکه + 1 جم
    • نیاز لول: 6
 
-2. سیل (Tsunami)
-   • قدرت: 300 آسیب
-   • قیمت: 30,000 ZC + 2 جم
+2. سیل
+   • قدرت: 150 آسیب
+   • قیمت: 3,000 سکه + 2 جم
    • نیاز لول: 7
 
-3. توفان (Storm)
-   • قدرت: 350 آسیب  
-   • قیمت: 35,000 ZC + 3 جم
+3. توفان
+   • قدرت: 175 آسیب  
+   • قیمت: 3,500 سکه + 3 جم
    • نیاز لول: 8
 
-4. تایفون (Typhoon)
-   • قدرت: 400 آسیب
-   • قیمت: 40,000 ZC + 4 جم
+4. تایفون
+   • قدرت: 200 آسیب
+   • قیمت: 4,000 سکه + 4 جم
    • نیاز لول: 9
 
-5. آپوکالیپس (Apocalypse)
-   • قدرت: 500 آسیب
-   • قیمت: 50,000 ZC + 5 جم
+5. آپوکالیپس
+   • قدرت: 250 آسیب
+   • قیمت: 5,000 سکه + 5 جم
    • نیاز لول: 10
     """
     
@@ -886,33 +1276,33 @@ async def cmd_market_normal(callback: CallbackQuery):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="شبح (Ghost)", callback_data="buy_ghost"),
-            InlineKeyboardButton(text="رعد (Thunder)", callback_data="buy_thunder")
+            InlineKeyboardButton(text="شبح", callback_data="buy_ghost"),
+            InlineKeyboardButton(text="رعد", callback_data="buy_thunder")
         ],
         [
-            InlineKeyboardButton(text="تندر (Boomer)", callback_data="buy_boomer"),
-            InlineKeyboardButton(text="هاوک (Hawk)", callback_data="buy_hawk")
+            InlineKeyboardButton(text="تندر", callback_data="buy_boomer"),
+            InlineKeyboardButton(text="هاوک", callback_data="buy_hawk")
         ],
         [
-            InlineKeyboardButton(text="پاتریوت (Patriot)", callback_data="buy_patriot"),
-            InlineKeyboardButton(text="⏩ موشک‌های ویژه", callback_data="market_special")
+            InlineKeyboardButton(text="پاتریوت", callback_data="buy_patriot"),
+            InlineKeyboardButton(text="⏩ ویژه", callback_data="market_special")
         ]
     ])
     
     market_text = f"""
 🏪 <b>بازار جنگ‌افزار</b>
 ━━━━━━━━━━━━━━
-💰 سکه شما: {user['zone_coin']} ZC
-💎 جم شما: {user['zone_gem']} ZG
+💰 سکه شما: {user['zone_coin']}
+💎 جم شما: {user['zone_gem']}
 🎯 لول: {user['level']}
 ━━━━━━━━━━━━━━
 📦 <b>موشک‌های معمولی:</b>
 
-1. شبح (Ghost) - 200 ZC
-2. رعد (Thunder) - 500 ZC  
-3. تندر (Boomer) - 1000 ZC
-4. هاوک (Hawk) - 2000 ZC
-5. پاتریوت (Patriot) - 5000 ZC
+1. شبح - 20 سکه
+2. رعد - 50 سکه  
+3. تندر - 100 سکه
+4. هاوک - 200 سکه
+5. پاتریوت - 500 سکه
     """
     
     await callback.message.edit_text(market_text, reply_markup=keyboard)
@@ -922,19 +1312,16 @@ async def process_buy(callback: CallbackQuery):
     missile_type = callback.data.replace("buy_", "")
     
     missile_map = {
-        # موشک‌های معمولی
-        'ghost': 'شبح (Ghost)',
-        'thunder': 'رعد (Thunder)',
-        'boomer': 'تندر (Boomer)',
-        'hawk': 'هاوک (Hawk)',
-        'patriot': 'پاتریوت (Patriot)',
-        
-        # موشک‌های ویژه
-        'meteor': 'شهاب (Meteor)',
-        'tsunami': 'سیل (Tsunami)',
-        'storm': 'توفان (Storm)',
-        'typhoon': 'تایفون (Typhoon)',
-        'apocalypse': 'آپوکالیپس (Apocalypse)'
+        'ghost': 'شبح',
+        'thunder': 'رعد',
+        'boomer': 'تندر',
+        'hawk': 'هاوک',
+        'patriot': 'پاتریوت',
+        'meteor': 'شهاب',
+        'tsunami': 'سیل',
+        'storm': 'توفان',
+        'typhoon': 'تایفون',
+        'apocalypse': 'آپوکالیپس'
     }
     
     if missile_type not in missile_map:
@@ -951,29 +1338,24 @@ async def process_buy(callback: CallbackQuery):
     user_id = callback.from_user.id
     user = db.get_user(user_id)
     
-    # بررسی سطح
     if user['level'] < missile_data['min_level']:
         await callback.answer(f"❌ نیاز به لول {missile_data['min_level']} دارید! (لول شما: {user['level']})")
         return
     
-    # بررسی موجودی سکه
     if user['zone_coin'] < missile_data['price']:
-        await callback.answer(f"❌ سکه کافی ندارید! نیاز: {missile_data['price']} ZC")
+        await callback.answer(f"❌ سکه کافی ندارید! نیاز: {missile_data['price']} سکه")
         return
     
-    # بررسی موجودی جم برای موشک‌های ویژه
     if missile_data['type'] == 'special' and missile_data.get('gem_cost', 0) > 0:
         if user['zone_gem'] < missile_data['gem_cost']:
             await callback.answer(f"❌ جم کافی ندارید! نیاز: {missile_data['gem_cost']} جم")
             return
     
-    # خرید
     db.update_user_coins(user_id, -missile_data['price'])
     
     if missile_data['type'] == 'special' and missile_data.get('gem_cost', 0) > 0:
         db.update_user_gems(user_id, -missile_data['gem_cost'])
     
-    # افزودن موشک
     conn = db.get_connection()
     cursor = conn.cursor()
     cursor.execute('''
@@ -985,19 +1367,18 @@ async def process_buy(callback: CallbackQuery):
     conn.commit()
     conn.close()
     
-    # گزارش خرید
     gem_text = f" + {missile_data['gem_cost']} جم" if missile_data.get('gem_cost', 0) > 0 else ""
     
     report_text = f"""
 ✅ <b>خرید موفق!</b>
 ━━━━━━━━━━━━━━
 📦 آیتم: {missile_name}
-💰 قیمت: {missile_data['price']} ZC{gem_text}
+💰 قیمت: {missile_data['price']} سکه{gem_text}
 💥 قدرت: {missile_data['damage']} آسیب
 🎯 نیاز لول: {missile_data['min_level']}
 ━━━━━━━━━━━━━━
-💰 سکه باقی‌مانده: {user['zone_coin'] - missile_data['price']} ZC
-💎 جم باقی‌مانده: {user['zone_gem'] - missile_data.get('gem_cost', 0)} ZG
+💰 سکه باقی‌مانده: {user['zone_coin'] - missile_data['price']}
+💎 جم باقی‌مانده: {user['zone_gem'] - missile_data.get('gem_cost', 0)}
     """
     
     await callback.message.edit_text(report_text)
@@ -1014,16 +1395,16 @@ async def cmd_boxes(message: Message):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🎁 باکس سکه (500 ZC)", callback_data="box_coin"),
-            InlineKeyboardButton(text="🎁 باکس ZP (1000 ZC)", callback_data="box_zp")
+            InlineKeyboardButton(text="🎁 باکس سکه (50 سکه)", callback_data="box_coin"),
+            InlineKeyboardButton(text="🎁 باکس ZP (100 سکه)", callback_data="box_zp")
         ],
         [
-            InlineKeyboardButton(text="💎 باکس ویژه (5 ZG)", callback_data="box_special"),
-            InlineKeyboardButton(text="👑 باکس افسانه‌ای (10 ZG)", callback_data="box_legendary")
+            InlineKeyboardButton(text="💎 باکس ویژه (2 جم)", callback_data="box_special"),
+            InlineKeyboardButton(text="👑 باکس افسانه‌ای (5 جم)", callback_data="box_legendary")
         ],
         [
             InlineKeyboardButton(text="🆓 باکس رایگان", callback_data="box_free"),
-            InlineKeyboardButton(text="📦 موجودی باکس‌ها", callback_data="box_inventory")
+            InlineKeyboardButton(text="📦 موجودی", callback_data="box_inventory")
         ],
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")]
     ])
@@ -1031,32 +1412,32 @@ async def cmd_boxes(message: Message):
     box_text = f"""
 🎁 <b>فروشگاه باکس‌ها</b>
 ━━━━━━━━━━━━━━
-💰 سکه شما: {user['zone_coin']} ZC
-💎 جم شما: {user['zone_gem']} ZG
-⚡ ZP شما: {user['zone_point']} ZP
+💰 سکه شما: {user['zone_coin']}
+💎 جم شما: {user['zone_gem']}
+⚡ ZP شما: {user['zone_point']}
 ━━━━━━━━━━━━━━
-🎰 شانس خود را امتحان کنید و جایزه بگیرید!
+🎰 شانس خود را امتحان کنید!
 
 1. 🎁 <b>باکس سکه</b>
-   • قیمت: 500 سکه
-   • جایزه: 100-2000 سکه
+   • قیمت: 50 سکه
+   • جایزه: 10-200 سکه
    
 2. 🎁 <b>باکس ZP</b>
-   • قیمت: 1000 سکه
-   • جایزه: 50-500 ZP
+   • قیمت: 100 سکه
+   • جایزه: 25-100 ZP
 
 3. 💎 <b>باکس ویژه</b>
-   • قیمت: 5 جم
+   • قیمت: 2 جم
    • جایزه: موشک‌های ویژه
 
 4. 👑 <b>باکس افسانه‌ای</b>
-   • قیمت: 10 جم
-   • جایزه: ترکیبی (شانس 10% جکپات)
+   • قیمت: 5 جم
+   • جایزه: ترکیبی (شانس 10%)
 
 5. 🆓 <b>باکس رایگان</b>
    • قیمت: رایگان
-   • جایزه: 10-100 (تصادفی)
-   • بازدید بعدی: 24 ساعت بعد
+   • جایزه: 5-50 (تصادفی)
+   • بدون کوئلتایم!
     """
     
     await message.answer(box_text, reply_markup=keyboard)
@@ -1072,11 +1453,11 @@ async def process_box(callback: CallbackQuery):
         return
     
     rewards = {
-        'coin': {'min': 100, 'max': 2000, 'cost_coin': 500, 'cost_gem': 0},
-        'zp': {'min': 50, 'max': 500, 'cost_coin': 1000, 'cost_gem': 0},
-        'special': {'min': 1, 'max': 3, 'cost_coin': 0, 'cost_gem': 5, 'type': 'missile'},
-        'legendary': {'min': 1000, 'max': 10000, 'cost_coin': 0, 'cost_gem': 10, 'type': 'mixed'},
-        'free': {'min': 10, 'max': 100, 'cost_coin': 0, 'cost_gem': 0, 'cooldown': 86400}  # 24 ساعت
+        'coin': {'min': 10, 'max': 200, 'cost_coin': 50, 'cost_gem': 0},
+        'zp': {'min': 25, 'max': 100, 'cost_coin': 100, 'cost_gem': 0},
+        'special': {'min': 1, 'max': 3, 'cost_coin': 0, 'cost_gem': 2, 'type': 'missile'},
+        'legendary': {'min': 100, 'max': 1000, 'cost_coin': 0, 'cost_gem': 5, 'type': 'mixed'},
+        'free': {'min': 5, 'max': 50, 'cost_coin': 0, 'cost_gem': 0}
     }
     
     if box_type not in rewards:
@@ -1085,7 +1466,6 @@ async def process_box(callback: CallbackQuery):
     
     reward = rewards[box_type]
     
-    # بررسی موجودی برای باکس‌های پولی
     if box_type != 'free':
         if user['zone_coin'] < reward['cost_coin']:
             await callback.answer("❌ سکه کافی ندارید!")
@@ -1095,32 +1475,48 @@ async def process_box(callback: CallbackQuery):
             await callback.answer("❌ جم کافی ندارید!")
             return
     
-    # کسر هزینه برای باکس‌های پولی
     if reward['cost_coin'] > 0:
         db.update_user_coins(user_id, -reward['cost_coin'])
     if reward['cost_gem'] > 0:
         db.update_user_gems(user_id, -reward['cost_gem'])
     
-    # تولید جایزه
     prize_text = ""
     prize_value = 0
     
     if box_type == 'free':
         prize = random.randint(reward['min'], reward['max'])
-        prize_type = random.choice(['coin', 'zp'])
+        prize_type = random.choice(['coin', 'zp', 'missile'])
         
         if prize_type == 'coin':
             db.update_user_coins(user_id, prize)
             prize_text = f"{prize} سکه"
             prize_value = prize
-        else:
+        elif prize_type == 'zp':
             db.update_user_zp(user_id, prize)
             prize_text = f"{prize} ZP"
             prize_value = prize
+        else:
+            # جایزه موشک رایگان
+            free_missiles = ['شبح', 'رعد', 'تندر']
+            missile = random.choice(free_missiles)
+            qty = random.randint(1, 3)
+            
+            conn = db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+            INSERT INTO user_missiles (user_id, missile_name, quantity)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, missile_name) 
+            DO UPDATE SET quantity = quantity + ?
+            ''', (user_id, missile, qty, qty))
+            conn.commit()
+            conn.close()
+            
+            prize_text = f"{qty} عدد {missile}"
+            prize_value = MISSILE_DATA[missile]['price'] * qty
     
     elif box_type == 'special':
-        # جایزه موشک ویژه
-        special_missiles = ['شهاب (Meteor)', 'سیل (Tsunami)', 'توفان (Storm)']
+        special_missiles = ['شهاب', 'سیل', 'توفان']
         missile = random.choice(special_missiles)
         
         conn = db.get_connection()
@@ -1138,9 +1534,8 @@ async def process_box(callback: CallbackQuery):
         prize_value = MISSILE_DATA[missile]['price']
     
     elif box_type == 'legendary':
-        # شانس 10% برای جایزه ویژه
-        if random.random() < 0.1:  # 10% شانس جکپات
-            prize = random.randint(5000, 20000)
+        if random.random() < 0.1:
+            prize = random.randint(500, 2000)
             db.update_user_coins(user_id, prize)
             prize_text = f"🎉 جکپات! {prize} سکه"
             prize_value = prize
@@ -1150,18 +1545,17 @@ async def process_box(callback: CallbackQuery):
             prize_text = f"{prize} سکه"
             prize_value = prize
     
-    else:  # باکس‌های معمولی
+    else:
         prize = random.randint(reward['min'], reward['max'])
         if box_type == 'coin':
             db.update_user_coins(user_id, prize)
             prize_text = f"{prize} سکه"
             prize_value = prize
-        else:  # zp
+        else:
             db.update_user_zp(user_id, prize)
             prize_text = f"{prize} ZP"
             prize_value = prize
     
-    # نام باکس
     box_names = {
         'coin': 'باکس سکه',
         'zp': 'باکس ZP',
@@ -1170,19 +1564,16 @@ async def process_box(callback: CallbackQuery):
         'free': 'باکس رایگان'
     }
     
-    # گزارش
     report_text = f"""
 🎉 <b>باکس باز شد!</b>
 ━━━━━━━━━━━━━━
 🎁 نوع باکس: {box_names[box_type]}
 🎰 جایزه: {prize_text}
-💰 ارزش تقریبی: {prize_value} ZC
+💰 ارزش تقریبی: {prize_value} سکه
 ━━━━━━━━━━━━━━
 💰 سکه فعلی: {user['zone_coin'] - reward['cost_coin'] + (prize if box_type == 'coin' or box_type == 'legendary' else 0)}
 💎 جم فعلی: {user['zone_gem'] - reward['cost_gem']}
 ⚡ ZP فعلی: {user['zone_point'] + (prize if box_type == 'zp' else 0)}
-━━━━━━━━━━━━━━
-{'🎊 تبریک! شانس با شما یار بود!' if box_type == 'legendary' and random.random() < 0.1 else ''}
     """
     
     await callback.message.edit_text(report_text)
@@ -1197,7 +1588,6 @@ async def cmd_miner(message: Message):
         await message.answer("❌ ابتدا با /start ثبت نام کنید!")
         return
     
-    # محاسبه ZP قابل دریافت
     miner_zp = 0
     if user['last_miner_claim']:
         time_passed = int(time.time()) - user['last_miner_claim']
@@ -1205,16 +1595,14 @@ async def cmd_miner(message: Message):
             zp_per_hour = MINER_LEVELS[user['miner_level']]['zp_per_hour']
             miner_zp = int((time_passed / 3600) * zp_per_hour)
     
-    # ایجاد کیبورد ماینر
     keyboard_buttons = []
     
-    if miner_zp > 0:
-        keyboard_buttons.append([InlineKeyboardButton(text=f"📦 دریافت {miner_zp} ZP", callback_data="claim_miner")])
+    # دکمه برداشت همیشه نمایش داده می‌شود
+    keyboard_buttons.append([InlineKeyboardButton(text=f"📦 برداشت {miner_zp} ZP", callback_data="claim_miner")])
     
     current_level = user['miner_level']
     if current_level < 15:
         upgrade_cost = MINER_LEVELS[current_level]['upgrade_cost']
-        next_zp = MINER_LEVELS.get(current_level + 1, {}).get('zp_per_hour', 'ماکس')
         keyboard_buttons.append([InlineKeyboardButton(text=f"⬆️ ارتقا به لول {current_level + 1}", callback_data="upgrade_miner")])
     
     keyboard_buttons.append([InlineKeyboardButton(text="📊 اطلاعات ماینر", callback_data="miner_info")])
@@ -1222,12 +1610,10 @@ async def cmd_miner(message: Message):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     
-    # زمان آخرین دریافت
     last_claim_time = "هرگز"
     if user['last_miner_claim']:
         last_claim_time = datetime.fromtimestamp(user['last_miner_claim']).strftime('%H:%M')
     
-    # اطلاعات سطح بعدی
     next_level_info = ""
     if current_level < 15:
         next_level = current_level + 1
@@ -1236,7 +1622,7 @@ async def cmd_miner(message: Message):
         next_level_info = f"""
 📈 سطح بعدی: {next_level}
 ⚡ تولید بعدی: {next_zp} ZP/ساعت
-💰 هزینه ارتقا: {next_cost} ZC
+💰 هزینه ارتقا: {next_cost} سکه
         """
     else:
         next_level_info = "🎉 شما به ماکس لول رسیده‌اید!"
@@ -1246,15 +1632,15 @@ async def cmd_miner(message: Message):
 ━━━━━━━━━━━━━━
 📊 سطح ماینر: {current_level}
 ⚡ تولید در ساعت: {MINER_LEVELS[current_level]['zp_per_hour']} ZP
-💰 هزینه ارتقا فعلی: {MINER_LEVELS[current_level]['upgrade_cost']} ZC
+💰 هزینه ارتقا فعلی: {MINER_LEVELS[current_level]['upgrade_cost']} سکه
 ━━━━━━━━━━━━━━
-📦 ZP قابل دریافت: {miner_zp}
-⏰ آخرین دریافت: {last_claim_time}
+📦 ZP قابل برداشت: {miner_zp}
+⏰ آخرین برداشت: {last_claim_time}
 ⏳ زمان سپری شده: {time_passed // 3600 if user['last_miner_claim'] else 0} ساعت
 ━━━━━━━━━━━━━━
 {next_level_info}
 ━━━━━━━━━━━━━━
-💰 سکه شما: {user['zone_coin']} ZC
+💰 سکه شما: {user['zone_coin']}
     """
     
     await message.answer(miner_text, reply_markup=keyboard)
@@ -1268,7 +1654,6 @@ async def process_claim_miner(callback: CallbackQuery):
         await callback.answer("❌ کاربر یافت نشد!")
         return
     
-    # محاسبه ZP قابل دریافت
     miner_zp = 0
     if user['last_miner_claim']:
         time_passed = int(time.time()) - user['last_miner_claim']
@@ -1280,10 +1665,8 @@ async def process_claim_miner(callback: CallbackQuery):
         await callback.answer("❌ هنوز ZP جدیدی تولید نشده!")
         return
     
-    # دریافت ZP
     db.update_user_zp(user_id, miner_zp)
     
-    # آپدیت زمان آخرین دریافت
     conn = db.get_connection()
     cursor = conn.cursor()
     cursor.execute('UPDATE users SET last_miner_claim = ? WHERE user_id = ?', 
@@ -1292,16 +1675,16 @@ async def process_claim_miner(callback: CallbackQuery):
     conn.close()
     
     await callback.message.edit_text(f"""
-✅ <b>دریافت موفق!</b>
+✅ <b>برداشت موفق!</b>
 ━━━━━━━━━━━━━━
-⛏️ ZP دریافتی: {miner_zp}
+⛏️ ZP برداشت شده: {miner_zp}
 💰 ZP کل: {user['zone_point'] + miner_zp} ZP
-⏰ زمان دریافت: {datetime.now().strftime('%H:%M')}
+⏰ زمان برداشت: {datetime.now().strftime('%H:%M')}
 ━━━━━━━━━━━━━━
 ⚡ ماینر دوباره شروع به کار کرد!
 📊 تولید فعلی: {MINER_LEVELS[user['miner_level']]['zp_per_hour']} ZP/ساعت
     """)
-    await callback.answer(f"✅ {miner_zp} ZP دریافت شد!")
+    await callback.answer(f"✅ {miner_zp} ZP برداشت شد!")
 
 @dp.callback_query(F.data == "upgrade_miner")
 async def process_upgrade_miner(callback: CallbackQuery):
@@ -1314,19 +1697,16 @@ async def process_upgrade_miner(callback: CallbackQuery):
     
     current_level = user['miner_level']
     
-    # بررسی ماکس لول
     if current_level >= 15:
         await callback.answer("🎉 ماینر شما در ماکس لول است!")
         return
     
     upgrade_cost = MINER_LEVELS[current_level]['upgrade_cost']
     
-    # بررسی موجودی
     if user['zone_coin'] < upgrade_cost:
-        await callback.answer(f"❌ سکه کافی ندارید! نیاز: {upgrade_cost} ZC")
+        await callback.answer(f"❌ سکه کافی ندارید! نیاز: {upgrade_cost} سکه")
         return
     
-    # ارتقا
     db.update_user_coins(user_id, -upgrade_cost)
     
     conn = db.get_connection()
@@ -1342,16 +1722,108 @@ async def process_upgrade_miner(callback: CallbackQuery):
 ━━━━━━━━━━━━━━
 ⛏️ سطح جدید: {new_level}
 ⚡ تولید جدید: {MINER_LEVELS[new_level]['zp_per_hour']} ZP/ساعت
-💰 هزینه پرداختی: {upgrade_cost} ZC
+💰 هزینه پرداختی: {upgrade_cost} سکه
 ━━━━━━━━━━━━━━
-💰 سکه باقی‌مانده: {user['zone_coin'] - upgrade_cost} ZC
+💰 سکه باقی‌مانده: {user['zone_coin'] - upgrade_cost} سکه
 🎉 ماینر شما با قدرت بیشتر کار می‌کند!
 
 📊 <b>آینده:</b>
 • سطح بعدی: {new_level + 1 if new_level < 15 else 'ماکس'}
-• هزینه بعدی: {MINER_LEVELS.get(new_level, {}).get('upgrade_cost', 'ماکس')} ZC
+• هزینه بعدی: {MINER_LEVELS.get(new_level, {}).get('upgrade_cost', 'ماکس')} سکه
     """)
     await callback.answer(f"✅ ماینر به سطح {new_level} ارتقا یافت!")
+
+@dp.message(F.text == "✈️ جنگنده")
+async def cmd_fighter(message: Message):
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await message.answer("❌ ابتدا با /start ثبت نام کنید!")
+        return
+    
+    current_level = user['fighter_level']
+    fighter_data = FIGHTER_LEVELS.get(current_level, {})
+    next_level_data = FIGHTER_LEVELS.get(current_level + 1, {})
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f"⬆️ ارتقا جنگنده", callback_data="upgrade_fighter"),
+            InlineKeyboardButton(text="📊 اطلاعات", callback_data="fighter_info")
+        ],
+        [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")]
+    ])
+    
+    fighter_text = f"""
+✈️ <b>سیستم جنگنده</b>
+━━━━━━━━━━━━━━
+📊 سطح جنگنده: {current_level}
+💥 بانس آسیب: +{fighter_data.get('damage_bonus', 0)*100:.0f}%
+🛡️ بانس دفاع: +{fighter_data.get('defense_bonus', 0)*100:.0f}%
+    """
+    
+    if current_level < 10:
+        fighter_text += f"""
+━━━━━━━━━━━━━━
+📈 سطح بعدی: {current_level + 1}
+💥 بانس آسیب بعدی: +{next_level_data.get('damage_bonus', 0)*100:.0f}%
+🛡️ بانس دفاع بعدی: +{next_level_data.get('defense_bonus', 0)*100:.0f}%
+💰 هزینه ارتقا: {next_level_data.get('upgrade_cost', 0)} سکه
+        """
+    else:
+        fighter_text += "\n\n🎉 شما به ماکس لول جنگنده رسیده‌اید!"
+    
+    fighter_text += f"""
+━━━━━━━━━━━━━━
+💰 سکه شما: {user['zone_coin']}
+    """
+    
+    await message.answer(fighter_text, reply_markup=keyboard)
+
+@dp.callback_query(F.data == "upgrade_fighter")
+async def process_upgrade_fighter(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    
+    if not user:
+        await callback.answer("❌ کاربر یافت نشد!")
+        return
+    
+    current_level = user['fighter_level']
+    
+    if current_level >= 10:
+        await callback.answer("🎉 جنگنده شما در ماکس لول است!")
+        return
+    
+    next_level_data = FIGHTER_LEVELS.get(current_level + 1, {})
+    upgrade_cost = next_level_data.get('upgrade_cost', 0)
+    
+    if user['zone_coin'] < upgrade_cost:
+        await callback.answer(f"❌ سکه کافی ندارید! نیاز: {upgrade_cost} سکه")
+        return
+    
+    db.update_user_coins(user_id, -upgrade_cost)
+    db.update_fighter_level(user_id, 1)
+    
+    new_level = current_level + 1
+    new_data = FIGHTER_LEVELS.get(new_level, {})
+    
+    await callback.message.edit_text(f"""
+✈️ <b>ارتقا موفق!</b>
+━━━━━━━━━━━━━━
+📊 سطح جدید: {new_level}
+💥 بانس آسیب جدید: +{new_data.get('damage_bonus', 0)*100:.0f}%
+🛡️ بانس دفاع جدید: +{new_data.get('defense_bonus', 0)*100:.0f}%
+💰 هزینه پرداختی: {upgrade_cost} سکه
+━━━━━━━━━━━━━━
+💰 سکه باقی‌مانده: {user['zone_coin'] - upgrade_cost} سکه
+🎉 جنگنده شما قوی‌تر شد!
+
+📊 <b>تاثیر:</b>
+• حمله‌های شما {new_data.get('damage_bonus', 0)*100:.0f}% قوی‌تر
+• دفاع شما {new_data.get('defense_bonus', 0)*100:.0f}% بهتر
+    """)
+    await callback.answer(f"✅ جنگنده به سطح {new_level} ارتقا یافت!")
 
 @dp.message(F.text == "🏰 دفاع")
 async def cmd_defense(message: Message):
@@ -1362,47 +1834,45 @@ async def cmd_defense(message: Message):
         await message.answer("❌ ابتدا با /start ثبت نام کنید!")
         return
     
+    # محاسبه بانس دفاع کل
+    total_defense_bonus = (user['defense_missile_level'] * 0.05) + \
+                         (user['defense_electronic_level'] * 0.03) + \
+                         (user['defense_antifighter_level'] * 0.07)
+    total_defense_bonus = min(total_defense_bonus, 0.5)  # حداکثر 50%
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=f"🚀 دفاع موشکی", callback_data="upgrade_missile_def"),
-            InlineKeyboardButton(text=f"📡 جنگ الکترونیک", callback_data="upgrade_electronic_def")
+            InlineKeyboardButton(text="🚀 دفاع موشکی", callback_data="upgrade_missile_def"),
+            InlineKeyboardButton(text="📡 جنگ الکترونیک", callback_data="upgrade_electronic_def")
         ],
         [
-            InlineKeyboardButton(text=f"✈️ ضد جنگنده", callback_data="upgrade_antifighter_def"),
+            InlineKeyboardButton(text="✈️ ضد جنگنده", callback_data="upgrade_antifighter_def"),
             InlineKeyboardButton(text="📊 اطلاعات دفاع", callback_data="defense_info")
         ],
         [InlineKeyboardButton(text="🔙 بازگشت", callback_data="back_to_main")]
     ])
     
-    # محاسبه بانس هر سیستم
-    missile_bonus = user['defense_missile_level'] * 5
-    electronic_bonus = user['defense_electronic_level'] * 3
-    antifighter_bonus = user['defense_antifighter_level'] * 7
-    total_bonus = user['total_defense_bonus'] * 100
-    
     defense_text = f"""
 🏰 <b>سیستم دفاع</b>
 ━━━━━━━━━━━━━━
-🛡️ بانس دفاع کلی: {total_bonus:.1f}%
+🛡️ بانس دفاع کلی: {total_defense_bonus*100:.1f}%
 ━━━━━━━━━━━━━━
 🚀 <b>دفاع موشکی</b>
    • لول: {user['defense_missile_level']}
-   • بانس: {missile_bonus}%
-   • هزینه ارتقا: {(user['defense_missile_level'] + 1) * 1000} ZC
+   • بانس: {user['defense_missile_level'] * 5}%
+   • هزینه ارتقا: {(user['defense_missile_level'] + 1) * 100} سکه
 
 📡 <b>جنگ الکترونیک</b>
    • لول: {user['defense_electronic_level']}
-   • بانس: {electronic_bonus}%
-   • هزینه ارتقا: {(user['defense_electronic_level'] + 1) * 800} ZC
+   • بانس: {user['defense_electronic_level'] * 3}%
+   • هزینه ارتقا: {(user['defense_electronic_level'] + 1) * 80} سکه
 
 ✈️ <b>ضد جنگنده</b>
    • لول: {user['defense_antifighter_level']}
-   • بانس: {antifighter_bonus}%
-   • هزینه ارتقا: {(user['defense_antifighter_level'] + 1) * 1200} ZC
+   • بانس: {user['defense_antifighter_level'] * 7}%
+   • هزینه ارتقا: {(user['defense_antifighter_level'] + 1) * 120} سکه
 ━━━━━━━━━━━━━━
-💰 سکه شما: {user['zone_coin']} ZC
-━━━━━━━━━━━━━━
-⚠️ <i>هر لول دفاع درصد خاصی از خسارت را کاهش می‌دهد.</i>
+💰 سکه شما: {user['zone_coin']}
     """
     
     await message.answer(defense_text, reply_markup=keyboard)
@@ -1417,22 +1887,21 @@ async def process_upgrade_defense(callback: CallbackQuery):
         await callback.answer("❌ کاربر یافت نشد!")
         return
     
-    # محاسبه هزینه ارتقا
     current_level = 0
     cost_multiplier = 0
     defense_name = ""
     
     if defense_type == 'missile':
         current_level = user['defense_missile_level']
-        cost_multiplier = 1000
+        cost_multiplier = 100
         defense_name = "دفاع موشکی"
     elif defense_type == 'electronic':
         current_level = user['defense_electronic_level']
-        cost_multiplier = 800
+        cost_multiplier = 80
         defense_name = "جنگ الکترونیک"
     elif defense_type == 'antifighter':
         current_level = user['defense_antifighter_level']
-        cost_multiplier = 1200
+        cost_multiplier = 120
         defense_name = "ضد جنگنده"
     else:
         await callback.answer("❌ سیستم دفاع نامعتبر!")
@@ -1440,12 +1909,10 @@ async def process_upgrade_defense(callback: CallbackQuery):
     
     upgrade_cost = (current_level + 1) * cost_multiplier
     
-    # بررسی موجودی
     if user['zone_coin'] < upgrade_cost:
-        await callback.answer(f"❌ سکه کافی ندارید! نیاز: {upgrade_cost} ZC")
+        await callback.answer(f"❌ سکه کافی ندارید! نیاز: {upgrade_cost} سکه")
         return
     
-    # ارتقا
     db.update_user_coins(user_id, -upgrade_cost)
     
     conn = db.get_connection()
@@ -1470,19 +1937,18 @@ async def process_upgrade_defense(callback: CallbackQuery):
     conn.commit()
     conn.close()
     
-    # دریافت اطلاعات جدید
     updated_user = db.get_user(user_id)
-    new_total_bonus = updated_user['total_defense_bonus'] * 100
+    new_total_bonus = min(updated_user['total_defense_bonus'], 0.5) * 100
     
     await callback.message.edit_text(f"""
 🛡️ <b>ارتقا موفق!</b>
 ━━━━━━━━━━━━━━
 🏰 سیستم: {defense_name}
 📈 لول جدید: {current_level + 1}
-💰 هزینه: {upgrade_cost} ZC
+💰 هزینه: {upgrade_cost} سکه
 ━━━━━━━━━━━━━━
 🛡️ بانس دفاع کلی: {new_total_bonus:.1f}%
-💰 سکه باقی‌مانده: {user['zone_coin'] - upgrade_cost} ZC
+💰 سکه باقی‌مانده: {user['zone_coin'] - upgrade_cost} سکه
 ━━━━━━━━━━━━━━
 ✅ سیستم دفاع شما تقویت شد!
 ⚠️ حداکثر بانس دفاع: 50%
@@ -1502,13 +1968,12 @@ async def cmd_ranking(message: Message):
     for i, user in enumerate(top_users, 1):
         medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
         
-        # نمایش نام کاربر
         username = user['username'] or user['full_name']
         if len(username) > 15:
             username = username[:15] + "..."
         
         ranking_text += f"{medal} <b>{username}</b>\n"
-        ranking_text += f"   💰 {user['zone_coin']:,} ZC | 💎 {user['zone_gem']} ZG | ⚡ {user['zone_point']} ZP\n"
+        ranking_text += f"   💰 {user['zone_coin']:,} سکه | 💎 {user['zone_gem']} جم | ⚡ {user['zone_point']} ZP\n"
         ranking_text += f"   🎯 لول {user['level']} | 👤 {user['user_id']}\n"
         
         if i < len(top_users):
@@ -1518,79 +1983,159 @@ async def cmd_ranking(message: Message):
 ━━━━━━━━━━━━━━━━━━
 📈 <b>آمار کلی:</b>
 • تعداد کاربران در رنکینگ: {len(top_users)}
-• بیشترین سکه: {top_users[0]['zone_coin']:,} ZC
+• بیشترین سکه: {top_users[0]['zone_coin']:,} سکه
 • بالاترین لول: لول {max(u['level'] for u in top_users)}
     """
     
     await message.answer(ranking_text)
 
-@dp.message(F.text == "📖 راهنما")
-async def cmd_help(message: Message):
-    help_text = """
-📖 <b>راهنمای کامل جنگ‌افزار</b>
+@dp.message(F.text == "🆘 پشتیبانی")
+async def cmd_support(message: Message):
+    support_text = """
+🆘 <b>پشتیبانی و راهنما</b>
 ━━━━━━━━━━━━━━━━━━
-🎮 <b>دستورات اصلی:</b>
-• /start - شروع بازی
-• 👤 پروفایل - مشاهده پروفایل
-• ⚔️ حمله - حمله به کاربران دیگر
-• 🏪 بازار - خرید موشک و تجهیزات
-• 🎁 باکس - خرید باکس‌های جایزه
-• ⛏️ ماینر - سیستم ماینینگ ZP
-• 🏰 دفاع - ارتقا سیستم دفاع
-• 📊 رنکینگ - مشاهده رتبه‌ها
-━━━━━━━━━━━━━━━━━━
-⚔️ <b>روش حمله:</b>
-1. روی پیام کاربر مورد نظر <b>ریپلای (Reply)</b> کنید
-2. سپس دستور /attack را بنویسید
-3. نوع حمله را انتخاب کنید
+📞 <b>ارتباط با مدیریت:</b>
+• برای گزارش مشکل: @YourSupportUsername
+• برای پیشنهاد: @YourSupportUsername
+• برای همکاری: @YourSupportUsername
 
-🏪 <b>بازار موشک:</b>
-• شبح (Ghost) - پایه‌ای
-• رعد (Thunder) - متوسط
-• تندر (Boomer) - پیشرفته
-• هاوک (Hawk) - حرفه‌ای
-• پاتریوت (Patriot) - نخبه
+📖 <b>راهنمای سریع:</b>
+• حمله: ریپلای + "حمله با [نام موشک]"
+• انتقام: از منوی انتقام یا دکمه در پیام حمله
+• ماینر: همیشه قابل برداشت است
+• جنگنده: آسیب و دفاع شما را افزایش می‌دهد
+• دفاع: از سکه‌های شما محافظت می‌کند
 
-💣 <b>موشک‌های ویژه:</b>
-• شهاب (Meteor) - نیاز جم
-• سیل (Tsunami) - نیاز جم
-• توفان (Storm) - نیاز جم
-• تایفون (Typhoon) - نیاز جم
-• آپوکالیپس (Apocalypse) - قوی‌ترین
+⚠️ <b>قوانین:</b>
+1. احترام به دیگر کاربران
+2. عدم سوءاستفاده از باگ‌ها
+3. گزارش مشکلات به پشتیبانی
+4. لطفا اسپم نکنید
 
-💰 <b>ارزها:</b>
-• ZC (Zone Coin) - سکه اصلی
-• ZG (Zone Gem) - جم (ارز ویژه)
-• ZP (Zone Point) - امتیاز (از ماینر)
+💰 <b>دریافت جم:</b>
+• فقط از باکس ویژه و افسانه‌ای
+• از غنیمت حملات
+• هدایای ادمین
 
-⛏️ <b>ماینر:</b>
-• هر ساعت ZP تولید می‌کند
-• با ارتقا تولید افزایش می‌یابد
-• حداکثر 15 سطح
-
-🏰 <b>دفاع:</b>
-• دفاع موشکی - کاهش 5% در هر سطح
-• جنگ الکترونیک - کاهش 3% در هر سطح
-• ضد جنگنده - کاهش 7% در هر سطح
-• حداکثر کاهش خسارت: 50%
-
-🎁 <b>باکس‌ها:</b>
-• باکس سکه - جایزه سکه
-• باکس ZP - جایزه امتیاز
-• باکس ویژه - جایزه موشک
-• باکس افسانه‌ای - شانس جکپات
-• باکس رایگان - هر 24 ساعت
-
-━━━━━━━━━━━━━━━━━━
-🎯 <b>نکات مهم:</b>
-• با حمله موفق XP دریافت می‌کنید
-• با افزایش لول جایزه می‌گیرید
-• از دفاع قوی برای محافظت استفاده کنید
-• ماینر را به موقع ارتقا دهید
-• هر 24 ساعت باکس رایگان بگیرید
+🎮 <b>لذت ببرید و پیروز باشید!</b>
     """
     
-    await message.answer(help_text)
+    await message.answer(support_text)
+
+@dp.callback_query(F.data == "miner_info")
+async def cmd_miner_info(callback: CallbackQuery):
+    miner_info = """
+⛏️ <b>اطلاعات ماینر</b>
+━━━━━━━━━━━━━━
+📊 <b>ویژگی‌ها:</b>
+• تولید دائمی ZP
+• همیشه قابل برداشت
+• بدون کوئلتایم
+• حداکثر 15 سطح
+
+💡 <b>نکات:</b>
+• هر ساعت ZP تولید می‌شود
+• می‌توانید هر زمان برداشت کنید
+• باقی‌مانده ZP ذخیره می‌شود
+• ارتقا تولید را افزایش می‌دهد
+
+🎯 <b>اهداف:</b>
+• ZP برای ارتقا سیستم‌ها
+• خرید آیتم‌های ویژه
+• افزایش قدرت کلی
+    """
+    
+    await callback.message.edit_text(miner_info)
+    await callback.answer()
+
+@dp.callback_query(F.data == "defense_info")
+async def cmd_defense_info(callback: CallbackQuery):
+    defense_info = """
+🏰 <b>اطلاعات سیستم دفاع</b>
+━━━━━━━━━━━━━━
+🛡️ <b>دفاع موشکی:</b>
+• کاهش خسارت: 5% در هر سطح
+• بهترین در برابر: موشک‌های معمولی
+
+📡 <b>جنگ الکترونیک:</b>
+• کاهش خسارت: 3% در هر سطح  
+• بهترین در برابر: موشک‌های هدایت‌شونده
+
+✈️ <b>ضد جنگنده:</b>
+• کاهش خسارت: 7% در هر سطح
+• بهترین در برابر: حملات هوایی
+
+━━━━━━━━━━━━━━
+⚠️ <b>نکات مهم:</b>
+• حداکثر کاهش خسارت: 50%
+• هر سیستم در برابر نوع خاصی مؤثر است
+• ترکیب سیستم‌ها بهترین نتیجه را می‌دهد
+    """
+    
+    await callback.message.edit_text(defense_info)
+    await callback.answer()
+
+@dp.callback_query(F.data == "fighter_info")
+async def cmd_fighter_info(callback: CallbackQuery):
+    fighter_info = """
+✈️ <b>اطلاعات جنگنده</b>
+━━━━━━━━━━━━━━
+💥 <b>مزایا:</b>
+• افزایش آسیب حملات
+• افزایش دفاع
+• بهبود عملکرد کلی
+
+📊 <b>سطح‌ها:</b>
+• 0: پایه (بدون بانس)
+• 1: +5% آسیب، +2% دفاع
+• 2: +10% آسیب، +4% دفاع
+• 3: +15% آسیب، +6% دفاع
+• ...
+• 10: +50% آسیب، +20% دفاع
+
+━━━━━━━━━━━━━━
+🎯 <b>تاثیر:</b>
+• در همه حملات تاثیر دارد
+• در دفاع هم تاثیر دارد
+• ارزش سرمایه‌گذاری دارد
+    """
+    
+    await callback.message.edit_text(fighter_info)
+    await callback.answer()
+
+@dp.callback_query(F.data == "box_inventory")
+async def cmd_box_inventory(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user = db.get_user(user_id)
+    
+    missiles = db.get_user_missiles(user_id)
+    
+    inventory_text = f"""
+📦 <b>موجودی شما</b>
+━━━━━━━━━━━━━━
+💰 سکه: {user['zone_coin']}
+💎 جم: {user['zone_gem']}
+⚡ ZP: {user['zone_point']}
+━━━━━━━━━━━━━━
+💣 <b>موشک‌ها:</b>
+    """
+    
+    if missiles:
+        for missile in missiles:
+            inventory_text += f"\n• {missile['missile_name']}: {missile['quantity']} عدد"
+    else:
+        inventory_text += "\n• هیچ موشکی ندارید!"
+    
+    inventory_text += f"""
+━━━━━━━━━━━━━━
+🎯 لول: {user['level']}
+⭐ XP: {user['xp']}/{user['level'] * 100}
+✈️ جنگنده: لول {user['fighter_level']}
+⛏️ ماینر: لول {user['miner_level']}
+    """
+    
+    await callback.message.edit_text(inventory_text)
+    await callback.answer()
 
 # === دستورات ادمین ===
 @dp.message(F.text == "👑 پنل ادمین")
@@ -1601,7 +2146,6 @@ async def cmd_admin_panel(message: Message):
         await message.answer("❌ دسترسی ممنوع! شما ادمین نیستید.")
         return
     
-    # بررسی در دیتابیس
     user = db.get_user(user_id)
     if not user or not user['is_admin']:
         await message.answer("❌ دسترسی ممنوع! شما ادمین نیستید.")
@@ -1625,7 +2169,17 @@ async def cmd_admin_panel(message: Message):
 ⚠️ دسترسی فقط برای ادمین‌ها
     """
     
-    await message.answer(admin_text, reply_markup=create_admin_keyboard())
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 آمار کامل"), KeyboardButton(text="📢 پیام همگانی")],
+            [KeyboardButton(text="🎁 هدیه همگانی"), KeyboardButton(text="➕ سکه")],
+            [KeyboardButton(text="💎 جم"), KeyboardButton(text="⚡ ZP")],
+            [KeyboardButton(text="📈 تغییر لول"), KeyboardButton(text="🔙 بازگشت")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(admin_text, reply_markup=keyboard)
 
 @dp.message(F.text == "📊 آمار کامل")
 async def cmd_admin_stats(message: Message):
@@ -1638,7 +2192,6 @@ async def cmd_admin_stats(message: Message):
     conn = db.get_connection()
     cursor = conn.cursor()
     
-    # آمار کلی
     cursor.execute('SELECT COUNT(*) as total_users FROM users')
     total_users = cursor.fetchone()['total_users']
     
@@ -1657,7 +2210,6 @@ async def cmd_admin_stats(message: Message):
     cursor.execute('SELECT AVG(level) as avg_level FROM users')
     avg_level = cursor.fetchone()['avg_level'] or 0
     
-    # آخرین کاربران
     cursor.execute('''
     SELECT user_id, username, full_name, created_at 
     FROM users 
@@ -1666,7 +2218,6 @@ async def cmd_admin_stats(message: Message):
     ''')
     recent_users = cursor.fetchall()
     
-    # فعالیت امروز
     today = int(time.time()) - 86400
     cursor.execute('SELECT COUNT(*) as today_users FROM users WHERE created_at > ?', (today,))
     today_users = cursor.fetchone()['today_users']
@@ -1681,9 +2232,9 @@ async def cmd_admin_stats(message: Message):
 ⚔️ تعداد حمله‌ها: {total_attacks}
 🎯 میانگین لول: {avg_level:.1f}
 ━━━━━━━━━━━━━━
-💰 کل سکه‌ها: {total_coins:,} ZC
-💎 کل جم‌ها: {total_gems:,} ZG  
-⚡ کل ZP: {total_zp:,} ZP
+💰 کل سکه‌ها: {total_coins:,}
+💎 کل جم‌ها: {total_gems:,}  
+⚡ کل ZP: {total_zp:,}
 ━━━━━━━━━━━━━━
 📅 <b>آخرین کاربران:</b>
     """
@@ -1703,7 +2254,7 @@ async def cmd_broadcast(message: Message, state: FSMContext):
         await message.answer("❌ دسترسی ممنوع!")
         return
     
-    await message.answer("📝 لطفا پیام همگانی را ارسال کنید (می‌توانید از HTML استفاده کنید):")
+    await message.answer("📝 لطفا پیام همگانی را ارسال کنید:")
     await state.set_state(UserStates.waiting_for_broadcast)
 
 @dp.message(UserStates.waiting_for_broadcast)
@@ -1722,7 +2273,7 @@ async def process_broadcast(message: Message, state: FSMContext):
                 f"📢 <b>پیام همگانی از مدیریت</b>\n━━━━━━━━━━━━━━\n{broadcast_text}"
             )
             success += 1
-            await asyncio.sleep(0.05)  # جلوگیری از محدودیت
+            await asyncio.sleep(0.05)
         except:
             failed += 1
     
@@ -1746,11 +2297,11 @@ async def cmd_global_gift(message: Message):
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 1000 سکه به همه", callback_data="gift_all_coins_1000")],
-        [InlineKeyboardButton(text="💎 10 جم به همه", callback_data="gift_all_gems_10")],
-        [InlineKeyboardButton(text="⚡ 500 ZP به همه", callback_data="gift_all_zp_500")],
+        [InlineKeyboardButton(text="💰 500 سکه به همه", callback_data="gift_all_coins_500")],
+        [InlineKeyboardButton(text="💎 5 جم به همه", callback_data="gift_all_gems_5")],
+        [InlineKeyboardButton(text="⚡ 250 ZP به همه", callback_data="gift_all_zp_250")],
         [InlineKeyboardButton(text="🎁 همه موارد بالا", callback_data="gift_all_everything")],
-        [InlineKeyboardButton(text="💣 5 موشک شبح به همه", callback_data="gift_all_missiles")]
+        [InlineKeyboardButton(text="💣 3 موشک شبح به همه", callback_data="gift_all_missiles")]
     ])
     
     await message.answer("🎁 انتخاب هدیه همگانی:", reply_markup=keyboard)
@@ -1761,37 +2312,37 @@ async def process_global_gift(callback: CallbackQuery):
     
     users = db.get_all_users()
     
-    if gift_type == 'coins_1000':
+    if gift_type == 'coins_500':
         for user in users:
-            db.update_user_coins(user['user_id'], 1000)
-        gift_text = "1000 سکه"
-    elif gift_type == 'gems_10':
+            db.update_user_coins(user['user_id'], 500)
+        gift_text = "500 سکه"
+    elif gift_type == 'gems_5':
         for user in users:
-            db.update_user_gems(user['user_id'], 10)
-        gift_text = "10 جم"
-    elif gift_type == 'zp_500':
+            db.update_user_gems(user['user_id'], 5)
+        gift_text = "5 جم"
+    elif gift_type == 'zp_250':
         for user in users:
-            db.update_user_zp(user['user_id'], 500)
-        gift_text = "500 ZP"
+            db.update_user_zp(user['user_id'], 250)
+        gift_text = "250 ZP"
     elif gift_type == 'everything':
         for user in users:
-            db.update_user_coins(user['user_id'], 1000)
-            db.update_user_gems(user['user_id'], 10)
-            db.update_user_zp(user['user_id'], 500)
-        gift_text = "1000 سکه + 10 جم + 500 ZP"
+            db.update_user_coins(user['user_id'], 500)
+            db.update_user_gems(user['user_id'], 5)
+            db.update_user_zp(user['user_id'], 250)
+        gift_text = "500 سکه + 5 جم + 250 ZP"
     elif gift_type == 'missiles':
         for user in users:
             conn = db.get_connection()
             cursor = conn.cursor()
             cursor.execute('''
             INSERT INTO user_missiles (user_id, missile_name, quantity)
-            VALUES (?, ?, 5)
+            VALUES (?, ?, 3)
             ON CONFLICT(user_id, missile_name) 
-            DO UPDATE SET quantity = quantity + 5
-            ''', (user['user_id'], 'شبح (Ghost)'))
+            DO UPDATE SET quantity = quantity + 3
+            ''', (user['user_id'], 'شبح'))
             conn.commit()
             conn.close()
-        gift_text = "5 موشک شبح"
+        gift_text = "3 موشک شبح"
     
     await callback.message.edit_text(f"""
 🎉 <b>هدیه همگانی ارسال شد!</b>
@@ -1862,7 +2413,6 @@ async def process_gift_amount(message: Message, state: FSMContext):
             await message.answer("❌ کاربر یافت نشد!")
             return
         
-        # تشخیص نوع هدیه از متن قبلی
         if "سکه" in message.reply_to_message.text:
             db.update_user_coins(target_id, amount)
             gift_type = "سکه"
@@ -1876,7 +2426,6 @@ async def process_gift_amount(message: Message, state: FSMContext):
             gift_type = "ZP"
             new_amount = target_user['zone_point'] + amount
         elif "لول" in message.reply_to_message.text:
-            # تغییر لول
             conn = db.get_connection()
             cursor = conn.cursor()
             cursor.execute('UPDATE users SET level = ? WHERE user_id = ?', (amount, target_id))
@@ -1915,95 +2464,6 @@ async def callback_back_to_main(callback: CallbackQuery):
     await callback.message.edit_text("🔙 بازگشت به منوی اصلی")
     await callback.message.answer("منوی اصلی:", reply_markup=create_main_keyboard())
 
-@dp.callback_query(F.data == "miner_info")
-async def cmd_miner_info(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    miner_info = f"""
-⛏️ <b>اطلاعات ماینر</b>
-━━━━━━━━━━━━━━
-📊 لول فعلی: {user['miner_level']}
-⚡ تولید/ساعت: {MINER_LEVELS[user['miner_level']]['zp_per_hour']} ZP
-💰 درآمد روزانه: {MINER_LEVELS[user['miner_level']]['zp_per_hour'] * 24:,} ZP
-📈 درآمد ماهانه: {MINER_LEVELS[user['miner_level']]['zp_per_hour'] * 24 * 30:,} ZP
-━━━━━━━━━━━━━━
-🎯 <b>سطح‌های ماینر:</b>
-1. پایه (100 ZP/ساعت)
-2. متوسط (200 ZP/ساعت)
-3. پیشرفته (300 ZP/ساعت)
-4. حرفه‌ای (400 ZP/ساعت)
-5. فوق‌حرفه‌ای (500 ZP/ساعت)
-...
-15. خداگونه (1500 ZP/ساعت)
-    """
-    
-    await callback.message.edit_text(miner_info)
-    await callback.answer()
-
-@dp.callback_query(F.data == "defense_info")
-async def cmd_defense_info(callback: CallbackQuery):
-    defense_info = """
-🏰 <b>اطلاعات سیستم دفاع</b>
-━━━━━━━━━━━━━━
-🛡️ <b>دفاع موشکی:</b>
-• کاهش خسارت: 5% در هر سطح
-• حداکثر: 25% (سطح 5)
-• بهترین در برابر: موشک‌های معمولی
-
-📡 <b>جنگ الکترونیک:</b>
-• کاهش خسارت: 3% در هر سطح
-• حداکثر: 15% (سطح 5)
-• بهترین در برابر: موشک‌های هدایت‌شونده
-
-✈️ <b>ضد جنگنده:</b>
-• کاهش خسارت: 7% در هر سطح
-• حداکثر: 35% (سطح 5)
-• بهترین در برابر: حملات هوایی
-
-━━━━━━━━━━━━━━
-⚠️ <b>نکات مهم:</b>
-• حداکثر کاهش خسارت کلی: 50%
-• هر سیستم دفاعی در برابر نوع خاصی مؤثر است
-• ترکیب سیستم‌های دفاعی بهترین نتیجه را می‌دهد
-• ارتقای دفاع هزینه‌بر است اما ارزش دارد
-    """
-    
-    await callback.message.edit_text(defense_info)
-    await callback.answer()
-
-@dp.callback_query(F.data == "box_inventory")
-async def cmd_box_inventory(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    user = db.get_user(user_id)
-    
-    missiles = db.get_user_missiles(user_id)
-    
-    inventory_text = f"""
-📦 <b>موجودی شما</b>
-━━━━━━━━━━━━━━
-💰 سکه: {user['zone_coin']} ZC
-💎 جم: {user['zone_gem']} ZG
-⚡ ZP: {user['zone_point']} ZP
-━━━━━━━━━━━━━━
-💣 <b>موشک‌ها:</b>
-    """
-    
-    if missiles:
-        for missile in missiles:
-            inventory_text += f"\n• {missile['missile_name']}: {missile['quantity']} عدد"
-    else:
-        inventory_text += "\n• هیچ موشکی ندارید!"
-    
-    inventory_text += f"""
-━━━━━━━━━━━━━━
-🎯 لول: {user['level']}
-⭐ XP: {user['xp']}/{user['level'] * 100}
-    """
-    
-    await callback.message.edit_text(inventory_text)
-    await callback.answer()
-
 # === Keep Alive برای Railway ===
 async def keep_alive():
     """ارسال درخواست Keep-Alive"""
@@ -2017,22 +2477,17 @@ async def keep_alive():
 
 async def main():
     """تابع اصلی"""
-    logger.info("🚀 Starting Warzone Bot...")
+    logger.info("🚀 Starting Warzone Bot v3.0...")
     
-    # Keep-Alive دوره‌ای
     async def keep_alive_task():
         while True:
             await keep_alive()
-            await asyncio.sleep(300)  # هر 5 دقیقه
+            await asyncio.sleep(300)
     
-    # شروع Keep-Alive
     asyncio.create_task(keep_alive_task())
     
     logger.info("🤖 Bot is starting to poll...")
-    
-    # راه‌اندازی ربات
     await dp.start_polling(bot)
-    
     logger.info("🛑 Bot polling stopped")
 
 if __name__ == '__main__':
